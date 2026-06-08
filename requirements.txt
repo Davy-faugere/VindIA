@@ -1,0 +1,8 @@
+# Dépendances runtime (NON requises pour les tests unitaires stdlib / la CI).
+# Installées sur le VPS au câblage live du périmètre B.
+PyMySQL>=1.1
+
+# Ajoutés au fil du câblage :
+# livekit
+# livekit-rtc
+# mistralai

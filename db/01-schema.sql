@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   INDEX idx_sessions_room (room)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Résolution diarisation → identité : le speaker_id Voxtral (label transitoire) est
+-- lié à un member_id. JAMAIS l'inverse (le speaker n'est pas une identité).
+CREATE TABLE IF NOT EXISTS speaker_bindings (
+  id          CHAR(36)     NOT NULL PRIMARY KEY,
+  tenant_id   CHAR(36)     NOT NULL,
+  session_id  CHAR(36)     NOT NULL,
+  speaker_id  VARCHAR(64)  NOT NULL,
+  member_id   CHAR(36)     NOT NULL,
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_spk_member FOREIGN KEY (member_id) REFERENCES members(id),
+  UNIQUE KEY uq_speaker (session_id, speaker_id),
+  INDEX idx_spk_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Audit append-only : pas d'UPDATE/DELETE applicatif (à durcir via privilèges + triggers).
 CREATE TABLE IF NOT EXISTS audit_log (
   id          CHAR(36)     NOT NULL PRIMARY KEY,

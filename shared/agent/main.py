@@ -37,8 +37,8 @@ async def on_room_opened(
 
     room_out = LiveKitRoomOut(room)
     if runtime is not None:
-        # TODO(runtime): await runtime.open(desc, room_out=room_out)
-        pass
+        # ConversationRuntime.open(desc, room_out) — enregistre la session + la sortie.
+        await runtime.open(desc, room_out)
 
     bridge = LiveKitAudioBridge(registry)
     bridge.on_utterance = router.dispatch

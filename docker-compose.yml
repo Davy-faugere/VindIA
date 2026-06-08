@@ -1,0 +1,32 @@
+# VindIA — MariaDB locale (souveraineté : jamais exposée publiquement).
+# Lancement : docker compose --env-file server/.env up -d
+# Le schéma db/01-schema.sql est appliqué à la 1ère init (volume vierge).
+name: vindia
+
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: vindia-mariadb
+    restart: unless-stopped
+    command:
+      - "--innodb-buffer-pool-size=128M"
+      - "--max-connections=50"
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: vindia
+      MARIADB_USER: vindia
+      MARIADB_PASSWORD: ${VINDIA_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:3307:3306"   # localhost uniquement
+    volumes:
+      - vindia-db:/var/lib/mysql
+      - ./db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  vindia-db:

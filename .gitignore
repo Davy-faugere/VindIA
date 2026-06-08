@@ -1,0 +1,24 @@
+# Secrets — JAMAIS committés
+.env
+server/.env
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Données locales / DB
+*.sqlite
+*.sqlite3
+data/
+mariadb-data/
+
+# OS / éditeurs
+.DS_Store
+.idea/
+.vscode/

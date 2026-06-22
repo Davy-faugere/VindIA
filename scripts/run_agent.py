@@ -55,8 +55,13 @@ async def run(room_name: str, *, tenant_id: str = "t-demo", member_id: str = "da
     # Briques : TTS Piper FR (PCM @ son sample_rate), STT Voxtral, LLM Mistral.
     synth, tts_sr = load_piper(voice_path)
     tts = CallableTTS(piper_tts_transport(synth))
+
+    def audit(_sid: str, event: str, payload: dict) -> None:
+        if event in ("transcript", "reply", "utterance_empty"):
+            print(f"[VindIA] {event}: {payload.get('text', '')[:90]!r}", flush=True)
+
     runtime = ConversationRuntime(
-        VoxtralSTT(), MistralLLM(system_prompt=SYSTEM_PROMPT), tts
+        VoxtralSTT(), MistralLLM(system_prompt=SYSTEM_PROMPT), tts, audit=audit
     )
     registry = RoomSessionRegistry()
 
@@ -88,7 +93,11 @@ async def run(room_name: str, *, tenant_id: str = "t-demo", member_id: str = "da
     room_out = LiveKitRoomOut(room, sample_rate=tts_sr)  # PCM Piper, pas de resampling
     await runtime.open(desc, room_out)
 
-    bridge = LiveKitAudioBridge(registry, sample_rate=48000)  # entrée LiveKit @ 48 kHz
+    # entrée LiveKit @ 48 kHz ; gate partagé = half-duplex (anti-larsen) ;
+    # seuil VAD prudent pour ignorer le bruit de fond (évite les énoncés fantômes).
+    bridge = LiveKitAudioBridge(
+        registry, sample_rate=48000, gate=room_out.gate, vad_threshold=1500.0
+    )
 
     async def on_utterance(sid: str, audio: object) -> None:
         try:

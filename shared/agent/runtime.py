@@ -34,6 +34,9 @@ AuditSink = Callable[[str, str, dict], None]
 class ConversationRuntime:
     """Orchestre le traitement d'un énoncé pour une session ouverte."""
 
+    # En-deçà, une transcription est considérée comme du bruit (pas de LLM/TTS).
+    MIN_UTTERANCE_CHARS = 3
+
     def __init__(
         self, stt: STT, llm: LLM, tts: TTS, audit: Optional[AuditSink] = None
     ) -> None:
@@ -63,8 +66,15 @@ class ConversationRuntime:
             self._emit(session_id, "utterance_skipped_no_consent", {})
             return
 
-        text = await self._stt.transcribe(audio, desc.locale)
+        text = (await self._stt.transcribe(audio, desc.locale) or "").strip()
         self._emit(session_id, "transcript", {"text": text})
+
+        # Anti-bruit : un énoncé sans parole exploitable (silence, souffle) ne
+        # déclenche NI le LLM NI le TTS — sinon l'agent « répond » au vide et
+        # gaspille le quota API.
+        if len(text) < self.MIN_UTTERANCE_CHARS:
+            self._emit(session_id, "utterance_empty", {"text": text})
+            return
 
         reply = await self._llm.reply(text, session_id=session_id)
         speech = await self._tts.synthesize(reply, desc.locale)

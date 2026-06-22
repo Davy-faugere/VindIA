@@ -226,10 +226,14 @@ class LiveKitAudioBridge:
         *,
         sample_rate: int = 48000,
         num_channels: int = 1,
+        gate: Optional["HalfDuplexGate"] = None,
+        vad_threshold: Optional[float] = None,
     ) -> None:
         self._registry = registry
         self._sample_rate = sample_rate
         self._num_channels = num_channels
+        self._gate = gate                  # anti-larsen : ignore l'entrée quand l'agent parle
+        self._vad_threshold = vad_threshold
         self.on_utterance: Optional[UtteranceCallback] = None
 
     async def start(self, room: object, *, stream_factory=None) -> None:
@@ -263,8 +267,18 @@ class LiveKitAudioBridge:
 
         Logique pure côté traitement (VAD) → testable avec un flux fake.
         """
-        seg = segmenter or VoiceSegmenter()
+        if segmenter is not None:
+            seg = segmenter
+        elif self._vad_threshold is not None:
+            seg = VoiceSegmenter(threshold=self._vad_threshold)
+        else:
+            seg = VoiceSegmenter()
         async for event in stream:
+            # Half-duplex : pendant que l'agent parle, on n'écoute pas (anti-larsen).
+            # On vide tout énoncé partiel pour ne pas mélanger avec l'écho.
+            if self._gate is not None and self._gate.agent_speaking:
+                seg.flush()
+                continue
             frame = getattr(event, "frame", event)  # AudioFrameEvent.frame ou frame direct
             utterance = seg.push(_frame_to_samples(frame))
             if utterance is not None:

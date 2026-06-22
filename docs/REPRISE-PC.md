@@ -23,11 +23,12 @@ CI verte vérifiée sur log réel. Working copy VPS : `/root/vindia-work`.
    puis `livekit livekit-rtc mistralai` (à décommenter dans `requirements.txt`).
 
 ## Étapes de reprise (ordre conseillé)
-1. **Round-trip DB réel** : `pip install pymysql`, exporter `DB_DSN` (cf. `server/.env`),
-   tester `server.db.open_store()` contre MariaDB (ajouter un test d'intégration *opt-in*
-   gardé par variable d'env, pour ne pas casser la CI 0-dépendance).
-2. **Adaptateurs LLM/STT/TTS** (dès clé Mistral) : classes implémentant `STT`/`LLM`/`TTS`,
-   injectées dans `ConversationRuntime`. Tester avec réponses mockées + 1 test live opt-in.
+1. ~~**Round-trip DB réel**~~ ✅ **FAIT (2026-06-22)** : `shared/agent/tests/test_store_integration.py`
+   (opt-in `VINDIA_DB_IT=1` + `DB_DSN`, skippé en CI → 0-dépendance préservée). Round-trip
+   tenant/member/binding/audit vert contre MariaDB, auto-nettoyant. `pymysql` installé sur le VPS.
+2. ~~**Adaptateurs LLM/STT/TTS**~~ ✅ **FAIT (2026-06-22, mocks)** : `shared/agent/adapters.py`
+   (`MistralLLM`/`VoxtralSTT`/`CallableTTS`, `transport` injectable, lazy-import). Tests mockés
+   offline + end-to-end runtime. Reste le **live opt-in** dès clé Mistral dans `server/.env`.
 3. **Câblage LiveKit** (dès creds) : `livekit_io.LiveKitRoomOut.play` et
    `LiveKitAudioBridge.start` (remplacer les `NotImplementedError`), puis `main.run()`
    (boucle de connexion + `on('room')`).

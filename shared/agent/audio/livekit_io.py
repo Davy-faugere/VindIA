@@ -92,17 +92,79 @@ class HalfDuplexGate:
 class LiveKitRoomOut:
     """Piste de sortie : publie les frames audio TTS dans la room.
 
-    Adaptateur SDK LiveKit. La publication réseau est un squelette TODO.
+    Adaptateur SDK LiveKit. `play(audio)` reçoit du PCM 16 bits mono au
+    `sample_rate` configuré (sortie du TTS), le découpe en frames de 10 ms et
+    les pousse sur une `AudioSource` publiée dans la room.
+
+    Testabilité : la `source` et la fabrique de frames (`frame_factory`) sont
+    injectables. En test, on injecte des fakes → 0 dépendance LiveKit. En live,
+    elles sont créées paresseusement via `livekit.rtc` au 1er `play`.
     """
 
-    def __init__(self, room: object) -> None:
+    FRAME_MS = 10  # durée d'une frame poussée à l'AudioSource
+
+    def __init__(
+        self,
+        room: object,
+        *,
+        sample_rate: int = 48000,
+        num_channels: int = 1,
+        source: object = None,
+        frame_factory: Optional[Callable[[bytes, int, int, int], object]] = None,
+        track_name: str = "vindia-tts",
+    ) -> None:
         self._room = room
         self._gate = HalfDuplexGate()
-        self._track = None  # piste audio locale (créée à l'ouverture)
+        self._sample_rate = sample_rate
+        self._num_channels = num_channels
+        self._source = source
+        self._frame_factory = frame_factory
+        self._track_name = track_name
+        self._published = source is not None
 
     @property
     def gate(self) -> HalfDuplexGate:
         return self._gate
+
+    def _chunks(self, audio: bytes):
+        """Découpe le PCM en tranches (data, samples_per_channel) de FRAME_MS.
+
+        Logique pure (pas de SDK) → testable hors-ligne.
+        """
+        bytes_per_sample = 2 * self._num_channels  # int16
+        spf = int(self._sample_rate * self.FRAME_MS / 1000)  # samples/frame/canal
+        step = spf * bytes_per_sample
+        if step <= 0:
+            return
+        for i in range(0, len(audio), step):
+            chunk = audio[i : i + step]
+            n = len(chunk) // bytes_per_sample
+            if n > 0:
+                yield chunk, n
+
+    async def _ensure_source(self) -> object:
+        """Crée et publie l'AudioSource au 1er usage (lazy, live uniquement)."""
+        if self._source is None:
+            import livekit.rtc as rtc  # lazy : hors CI
+
+            self._source = rtc.AudioSource(self._sample_rate, self._num_channels)
+            track = rtc.LocalAudioTrack.create_audio_track(self._track_name, self._source)
+            await self._room.local_participant.publish_track(
+                track, rtc.TrackPublishOptions()
+            )
+            self._published = True
+        return self._source
+
+    def _make_frame(self, data: bytes, samples_per_channel: int) -> object:
+        if self._frame_factory is not None:
+            return self._frame_factory(
+                data, self._sample_rate, self._num_channels, samples_per_channel
+            )
+        import livekit.rtc as rtc  # lazy : hors CI
+
+        return rtc.AudioFrame(
+            data, self._sample_rate, self._num_channels, samples_per_channel
+        )
 
     async def play(self, audio: object) -> None:
         """Publie les frames audio TTS sur la piste de sortie de la room.
@@ -110,11 +172,11 @@ class LiveKitRoomOut:
         Encadre la lecture par le half-duplex (anti-larsen) : on marque l'agent
         comme parlant pendant l'émission, ce qui suspend la capture entrante.
         """
+        source = await self._ensure_source()
         self._gate.agent_started()
         try:
-            # TODO(livekit): créer la piste locale si besoin, encoder `audio` en
-            # frames Opus/PCM et les pousser via livekit-rtc (AudioSource.capture_frame).
-            raise NotImplementedError("LiveKitRoomOut.play — câblage SDK LiveKit à faire")
+            for data, n in self._chunks(bytes(audio)):
+                await source.capture_frame(self._make_frame(data, n))
         finally:
             self._gate.agent_stopped()
 

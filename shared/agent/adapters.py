@@ -118,8 +118,11 @@ class VoxtralSTT:
     def _live_transport(self) -> SttTransport:
         async def _call(audio: object, locale: str) -> str:  # pragma: no cover - live
             client = self._lazy_client()
+            # L'API attend un objet File {file_name, content}, pas des bytes bruts.
             resp = await client.audio.transcriptions.complete_async(
-                model=self._model, file=audio, language=locale.split("-")[0]
+                model=self._model,
+                file={"file_name": "utterance.wav", "content": bytes(audio)},
+                language=locale.split("-")[0],
             )
             return resp.text
 

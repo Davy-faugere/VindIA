@@ -2,7 +2,10 @@
 # Installées sur le VPS au câblage live du périmètre B.
 PyMySQL>=1.1
 
-# Ajoutés au fil du câblage :
+# SDK Mistral (LLM via chat, STT via audio.transcriptions). Épinglé < 2 :
+# la série 2.x (2.4.x) a un empaquetage cassé (paquet sans top-level importable).
+mistralai>=1.5,<2
+
+# Ajoutés au fil du câblage LiveKit (J4) :
 # livekit
 # livekit-rtc
-# mistralai

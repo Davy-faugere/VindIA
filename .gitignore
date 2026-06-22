@@ -22,3 +22,6 @@ mariadb-data/
 .DS_Store
 .idea/
 .vscode/
+
+# Modèles de voix Piper (lourds, hors git)
+.voices/

@@ -6,6 +6,7 @@ PyMySQL>=1.1
 # la série 2.x (2.4.x) a un empaquetage cassé (paquet sans top-level importable).
 mistralai>=1.5,<2
 
-# Ajoutés au fil du câblage LiveKit (J4) :
-# livekit
-# livekit-rtc
+# Runtime live (installés sur le VPS / dans un venv ; cf. docs) :
+# livekit             # client temps réel
+# livekit-api         # mint de tokens
+# piper-tts           # TTS souverain FR self-host (voix fr_FR-siwis-medium)

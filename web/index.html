@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>VindIA — assistant vocal</title>
+<style>
+  :root{
+    --primary:#4F46E5; --primary-hover:#4338CA; --accent:#8B5CF6;
+    --soft:#EEF0FF; --bg:#fafafe; --text:#1B1E2B; --muted:#6b7280;
+    --ok:#0f766e; --radius:20px;
+    --font:'Inter','Inter Variable',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    font-family:var(--font); color:var(--text);
+    background:radial-gradient(1200px 700px at 50% -10%, var(--soft), var(--bg) 60%);
+    display:flex; align-items:center; justify-content:center;
+    padding:24px; -webkit-tap-highlight-color:transparent;
+  }
+  .card{
+    width:100%; max-width:440px; text-align:center;
+    background:#fff; border:1px solid #ececf6; border-radius:var(--radius);
+    box-shadow:0 20px 50px rgba(79,70,229,.10); padding:32px 24px 28px;
+  }
+  .brand{display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:4px}
+  .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}
+  h1{font-size:22px; font-weight:800; margin:0; letter-spacing:-.02em}
+  .sub{color:var(--muted); font-size:14px; margin:6px 0 26px}
+
+  .orb-wrap{position:relative; width:180px; height:180px; margin:0 auto 8px}
+  .orb{
+    position:absolute; inset:0; margin:auto; width:140px; height:140px; border-radius:50%;
+    border:none; cursor:pointer; color:#fff; font-weight:700; font-size:16px;
+    background:linear-gradient(145deg,var(--primary),var(--accent));
+    box-shadow:0 12px 30px rgba(79,70,229,.35); transition:transform .15s ease, box-shadow .2s;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .orb:active{transform:scale(.97)}
+  .orb:disabled{opacity:.7; cursor:default}
+  .ring{position:absolute; inset:0; margin:auto; width:140px;height:140px;border-radius:50%;
+    border:3px solid var(--accent); opacity:0; pointer-events:none}
+  body[data-state="listening"] .ring{animation:pulse 1.8s ease-out infinite}
+  body[data-state="speaking"] .orb{animation:breathe 1.2s ease-in-out infinite}
+  @keyframes pulse{0%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(1.45)}}
+  @keyframes breathe{0%,100%{box-shadow:0 12px 30px rgba(79,70,229,.35)}50%{box-shadow:0 12px 46px rgba(139,92,246,.65)}}
+
+  .state{margin:16px 0 0; font-size:15px; font-weight:600; min-height:22px}
+  .state .live{color:var(--primary)}
+  .hint{color:var(--muted); font-size:12.5px; margin-top:8px; line-height:1.5}
+  .transcript{
+    margin-top:22px; text-align:left; background:var(--soft); border-radius:14px;
+    padding:14px 16px; font-size:14px; line-height:1.55; max-height:200px; overflow:auto;
+    display:none;
+  }
+  .transcript.show{display:block}
+  .transcript .you{color:var(--text)}
+  .transcript .ai{color:var(--primary); font-weight:600}
+  .transcript p{margin:0 0 8px}
+  .err{color:#b91c1c; font-size:13px; margin-top:12px; min-height:18px}
+  footer{margin-top:18px; font-size:11px; color:var(--muted)}
+</style>
+</head>
+<body data-state="idle">
+  <main class="card">
+    <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
+    <p class="sub">Assistant vocal souverain — en français</p>
+
+    <div class="orb-wrap">
+      <span class="ring"></span>
+      <button id="orb" class="orb">Parler</button>
+    </div>
+
+    <div class="state" id="state">Prêt</div>
+    <p class="hint" id="hint">Mets un casque, puis appuie sur « Parler » et autorise le micro.</p>
+    <div class="err" id="err"></div>
+
+    <div class="transcript" id="transcript"></div>
+    <footer>Connexion chiffrée · audio traité en souveraineté EU</footer>
+  </main>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+(() => {
+  const LK = window.LivekitClient || window.LiveKitClient;
+  const $ = (id) => document.getElementById(id);
+  const body = document.body, orb = $('orb'), stateEl = $('state'),
+        hint = $('hint'), errEl = $('err'), tr = $('transcript');
+  let room = null, connected = false;
+
+  const setState = (s, label) => { body.dataset.state = s; if (label) stateEl.innerHTML = label; };
+  const addLine = (who, text) => {
+    tr.classList.add('show');
+    const p = document.createElement('p');
+    p.className = who;
+    p.textContent = (who === 'ai' ? 'VindIA : ' : 'Toi : ') + text;
+    tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
+  };
+
+  async function start() {
+    errEl.textContent = '';
+    orb.disabled = true; orb.textContent = '…';
+    setState('connecting', 'Connexion…');
+    try {
+      const r = await fetch('/token?identity=web-' + Math.floor(Date.now()/1000));
+      if (!r.ok) throw new Error('token ' + r.status);
+      const { url, token } = await r.json();
+
+      room = new LK.Room({ adaptiveStream:true, dynacast:true });
+
+      room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind === 'audio') {
+          const el = track.attach(); el.autoplay = true; document.body.appendChild(el);
+        }
+      });
+      // Transcriptions live (STT/agent) si l'agent les publie
+      room.on(LK.RoomEvent.TranscriptionReceived, (segs, participant) => {
+        const who = participant && participant.identity === 'vindia-agent' ? 'ai' : 'you';
+        const txt = segs.map(s => s.text).join(' ').trim();
+        if (txt) addLine(who, txt);
+      });
+      room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        if (!connected) return;
+        const agentSpeaking = speakers.some(p => p.identity === 'vindia-agent');
+        setState(agentSpeaking ? 'speaking' : 'listening',
+                 agentSpeaking ? '<span class="live">VindIA parle…</span>'
+                               : '<span class="live">À l\'écoute…</span>');
+      });
+      room.on(LK.RoomEvent.Disconnected, () => {
+        connected = false; setState('idle', 'Terminé');
+        orb.disabled = false; orb.textContent = 'Parler'; hint.textContent = 'Appuie pour reparler.';
+      });
+
+      await room.connect(url, token);
+      await room.localParticipant.setMicrophoneEnabled(true);
+      connected = true;
+      orb.disabled = false; orb.textContent = 'Arrêter';
+      hint.textContent = 'Parle naturellement. Réappuie pour arrêter.';
+      setState('listening', '<span class="live">À l\'écoute…</span>');
+    } catch (e) {
+      errEl.textContent = 'Connexion impossible : ' + (e.message || e);
+      setState('idle', 'Prêt'); orb.disabled = false; orb.textContent = 'Parler';
+    }
+  }
+
+  async function stop() {
+    if (room) { await room.disconnect(); room = null; }
+  }
+
+  orb.addEventListener('click', () => connected ? stop() : start());
+  if (!LK) { errEl.textContent = 'SDK LiveKit non chargé.'; orb.disabled = true; }
+})();
+</script>
+</body>
+</html>

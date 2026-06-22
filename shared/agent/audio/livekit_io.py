@@ -16,7 +16,13 @@ n'est JAMAIS utilisé comme identité — il est résolu vers un `member_id`.
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Dict, Optional
+import array
+import asyncio
+import io
+import wave
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence
+
+from .vad import VoiceSegmenter
 
 # Résolveur injecté : (tenant_id, speaker_id) -> member_id (ou None si inconnu).
 MemberResolver = Callable[[str, str], Optional[str]]
@@ -181,26 +187,94 @@ class LiveKitRoomOut:
             self._gate.agent_stopped()
 
 
+def _frame_to_samples(frame: object) -> Sequence[int]:
+    """AudioFrame (ou objet `.data`) PCM int16 -> séquence d'échantillons int.
+
+    Accepte un `livekit.rtc.AudioFrame` (attribut `.data`) ou un objet exposant
+    `.data`, ou des bytes bruts. Décodage int16 little-endian via `array` (stdlib).
+    """
+    data = getattr(frame, "data", frame)
+    return array.array("h", bytes(data))
+
+
+def _utterance_to_wav(
+    utterance: List[Sequence[int]], sample_rate: int, num_channels: int = 1
+) -> bytes:
+    """Liste de frames int16 -> WAV en mémoire (header = sample_rate, pas de
+    resampling : l'API STT lit le débit dans l'en-tête)."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(num_channels)
+        w.setsampwidth(2)  # int16
+        w.setframerate(sample_rate)
+        for frame in utterance:
+            w.writeframes(array.array("h", frame).tobytes())
+    return buf.getvalue()
+
+
 class LiveKitAudioBridge:
     """S'abonne aux pistes entrantes, alimente la VAD, émet les énoncés finalisés.
 
-    Adaptateur SDK LiveKit. L'abonnement réseau est un squelette TODO ; le mapping
-    room → session et la résolution membre passent par `RoomSessionRegistry`.
+    Adaptateur SDK LiveKit. `start` branche l'abonnement réseau (lazy SDK) ;
+    `_consume_stream` porte la logique (VAD + segmentation), testable hors-ligne
+    avec un flux fake. Le mapping room → session passe par `RoomSessionRegistry`.
     """
 
-    def __init__(self, registry: RoomSessionRegistry) -> None:
+    def __init__(
+        self,
+        registry: RoomSessionRegistry,
+        *,
+        sample_rate: int = 48000,
+        num_channels: int = 1,
+    ) -> None:
         self._registry = registry
+        self._sample_rate = sample_rate
+        self._num_channels = num_channels
         self.on_utterance: Optional[UtteranceCallback] = None
 
-    async def start(self, room: object) -> None:
-        """S'abonne aux pistes audio entrantes de la room.
+    async def start(self, room: object, *, stream_factory=None) -> None:
+        """S'abonne aux pistes audio entrantes : VAD → énoncés → `_emit`.
 
-        TODO(livekit): brancher room.on('track_subscribed'), lire les frames,
-        les pousser dans un VoiceSegmenter, et appeler `_emit` à chaque énoncé.
+        `stream_factory(track)` renvoie un flux async de frames (injectable en
+        test). En live, il est créé via `livekit.rtc.AudioStream`.
         """
-        raise NotImplementedError(
-            "LiveKitAudioBridge.start — abonnement pistes LiveKit à faire"
-        )
+        make_stream = stream_factory or self._default_stream_factory
+
+        def _on_track(track, *_) -> None:  # signature SDK : (track, publication, participant)
+            import livekit.rtc as rtc  # lazy : hors CI
+
+            if getattr(track, "kind", None) != rtc.TrackKind.KIND_AUDIO:
+                return
+            stream = make_stream(track)
+            asyncio.create_task(self._consume_stream(room.name, stream))
+
+        room.on("track_subscribed", _on_track)
+
+    @staticmethod
+    def _default_stream_factory(track: object):  # pragma: no cover - SDK live
+        import livekit.rtc as rtc
+
+        return rtc.AudioStream(track)
+
+    async def _consume_stream(
+        self, room_name: str, stream, *, segmenter: Optional[VoiceSegmenter] = None
+    ) -> None:
+        """Consomme un flux de frames : segmente en énoncés, émet chaque énoncé.
+
+        Logique pure côté traitement (VAD) → testable avec un flux fake.
+        """
+        seg = segmenter or VoiceSegmenter()
+        async for event in stream:
+            frame = getattr(event, "frame", event)  # AudioFrameEvent.frame ou frame direct
+            utterance = seg.push(_frame_to_samples(frame))
+            if utterance is not None:
+                await self._emit(room_name, self._wav(utterance))
+        tail = seg.flush()
+        if tail is not None:
+            await self._emit(room_name, self._wav(tail))
+
+    def _wav(self, utterance: List[Sequence[int]]) -> bytes:
+        return _utterance_to_wav(utterance, self._sample_rate, self._num_channels)
 
     async def _emit(self, room_name: str, audio: object) -> None:
         """Route un énoncé finalisé vers le callback, via la session de la room."""

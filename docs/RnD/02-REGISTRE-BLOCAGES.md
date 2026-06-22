@@ -8,7 +8,7 @@
 
 | ID | Blocage | Sévérité | Resp. | Statut |
 |---|---|---|---|---|
-| B-001 | Credentials Mistral + LiveKit non fournis | 🔴 | Davy | OUVERT |
+| B-001 | Credentials Mistral + LiveKit non fournis | 🔴 | Davy / Claude VPS | EN COURS (délégué Claude VPS, 2026-06-22) |
 | B-002 | Budget de latence E2E à tenir (< 700 ms) | 🟠 | Claude | OUVERT (recherche faite) |
 | B-003 | Licences TTS open-weights (usage commercial) | 🟡 | Davy/Claude | OUVERT (recherche faite) |
 | B-004 | Barge-in / AEC fiable hors casque | 🟡 | Claude | OUVERT (recherche faite) |
@@ -32,7 +32,11 @@ dans `docs/REPRISE-PC.md`.
   [Mistral data storage FAQ](https://help.mistral.ai/en/articles/347629-where-do-you-store-my-data-or-my-organization-s-data)
 - LiveKit : self-host possible (Apache-2.0) ou LiveKit Cloud. [github.com/livekit/agents](https://github.com/livekit/agents)
 **Action attendue** : Davy fournit les secrets dans `server/.env` (jamais committé).
-**En attendant** : Claude prépare les adaptateurs + tests mockés (prêts à brancher).
+**Mise à jour 2026-06-22** : mission **déléguée à Claude VPS** (renseignement `server/.env` +
+câblage adaptateurs STT/LLM/TTS + LiveKit, côté working copy VPS `/root/vindia-work`).
+**Coordination** : pour éviter les conflits, l'instance VPS travaille le **code** (`shared/agent/…`) ;
+cette instance reste sur la **R&D/doc/Notion/suivi** (`docs/RnD/…`) et ne touche pas `shared/agent/`
+sans accord. Reconverger les branches avant merge.
 
 ## B-002 — Budget de latence E2E 🟠
 **Description** : viser une latence perçue conversationnelle. Référence humaine : gap médian

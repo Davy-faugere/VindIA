@@ -2,6 +2,15 @@
 
 > Journal daté. Le plus récent en haut. Politique : 0 hallucination, tout sourcé.
 
+## Mise à jour (2026-06-22, fin de session)
+
+- **B-001 (credentials) délégué à Claude VPS** par Davy : renseignement `server/.env` + câblage
+  STT/LLM/TTS + LiveKit côté working copy VPS (`/root/vindia-work`).
+- **Répartition pour éviter les conflits** : Claude VPS = **code** (`shared/agent/…`) ; cette
+  instance = **R&D / doc / Notion / suivi** (`docs/RnD/…`). Reconverger les branches avant tout merge.
+- ⚠️ Attention branches : ce dossier est sur `claude/zen-ptolemy-wwx9yn` (PR #1). Vérifier sur quelle
+  branche pousse Claude VPS pour ne pas diverger silencieusement.
+
 ## État du moment (2026-06-22)
 
 - **Phase** : J0 — Cadrage R&D (préparation + identification des blocages).

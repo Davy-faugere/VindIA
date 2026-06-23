@@ -7,8 +7,7 @@
 <style>
   :root{
     --primary:#4F46E5; --primary-hover:#4338CA; --accent:#8B5CF6;
-    --soft:#EEF0FF; --bg:#fafafe; --text:#1B1E2B; --muted:#6b7280;
-    --ok:#0f766e; --radius:20px;
+    --soft:#EEF0FF; --bg:#fafafe; --text:#1B1E2B; --muted:#6b7280; --radius:20px;
     --font:'Inter','Inter Variable',system-ui,-apple-system,sans-serif;
   }
   *{box-sizing:border-box}
@@ -16,12 +15,12 @@
   body{
     font-family:var(--font); color:var(--text);
     background:radial-gradient(1200px 700px at 50% -10%, var(--soft), var(--bg) 60%);
-    display:flex; align-items:center; justify-content:center;
-    padding:24px; -webkit-tap-highlight-color:transparent;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+    -webkit-tap-highlight-color:transparent;
   }
   .card{
-    width:100%; max-width:440px; text-align:center;
-    background:#fff; border:1px solid #ececf6; border-radius:var(--radius);
+    width:100%; max-width:440px; text-align:center; background:#fff;
+    border:1px solid #ececf6; border-radius:var(--radius);
     box-shadow:0 20px 50px rgba(79,70,229,.10); padding:32px 24px 28px;
   }
   .brand{display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:4px}
@@ -43,6 +42,7 @@
     border:3px solid var(--accent); opacity:0; pointer-events:none}
   body[data-state="listening"] .ring{animation:pulse 1.8s ease-out infinite}
   body[data-state="speaking"] .orb{animation:breathe 1.2s ease-in-out infinite}
+  body[data-state="thinking"] .orb{animation:breathe 1s ease-in-out infinite}
   @keyframes pulse{0%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(1.45)}}
   @keyframes breathe{0%,100%{box-shadow:0 12px 30px rgba(79,70,229,.35)}50%{box-shadow:0 12px 46px rgba(139,92,246,.65)}}
 
@@ -51,13 +51,16 @@
   .hint{color:var(--muted); font-size:12.5px; margin-top:8px; line-height:1.5}
   .transcript{
     margin-top:22px; text-align:left; background:var(--soft); border-radius:14px;
-    padding:14px 16px; font-size:14px; line-height:1.55; max-height:200px; overflow:auto;
-    display:none;
+    padding:14px 16px; font-size:14px; line-height:1.55; max-height:240px; overflow:auto; display:none;
   }
   .transcript.show{display:block}
-  .transcript .you{color:var(--text)}
-  .transcript .ai{color:var(--primary); font-weight:600}
-  .transcript p{margin:0 0 8px}
+  .transcript p{margin:0 0 10px}
+  .transcript .you b{color:var(--text)}
+  .transcript .ai b{color:var(--primary)}
+  .typebar{display:flex; gap:8px; margin-top:16px}
+  .typebar input{flex:1; padding:11px 14px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:14px; outline:none}
+  .typebar input:focus{border-color:var(--accent)}
+  .typebar button{padding:0 16px; border:none; border-radius:12px; background:var(--primary); color:#fff; font-weight:600; cursor:pointer}
   .err{color:#b91c1c; font-size:13px; margin-top:12px; min-height:18px}
   footer{margin-top:18px; font-size:11px; color:var(--muted)}
 </style>
@@ -65,7 +68,7 @@
 <body data-state="idle">
   <main class="card">
     <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
-    <p class="sub">Assistant vocal souverain — en français</p>
+    <p class="sub">Assistant vocal — en français</p>
 
     <div class="orb-wrap">
       <span class="ring"></span>
@@ -73,83 +76,117 @@
     </div>
 
     <div class="state" id="state">Prêt</div>
-    <p class="hint" id="hint">Mets un casque, puis appuie sur « Parler » et autorise le micro.</p>
+    <p class="hint" id="hint">Appuie sur « Parler » et pose ta question à voix haute.</p>
     <div class="err" id="err"></div>
 
     <div class="transcript" id="transcript"></div>
-    <footer>Connexion chiffrée · audio traité en souveraineté EU</footer>
+
+    <div class="typebar">
+      <input id="textInput" type="text" placeholder="…ou écris ton message" />
+      <button id="sendBtn">Envoyer</button>
+    </div>
+
+    <footer>VindIA — cerveau Mistral · voix du navigateur</footer>
   </main>
 
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 <script>
 (() => {
-  const LK = window.LivekitClient || window.LiveKitClient;
+  const WEBHOOK = "https://n8n.faugere-davy.fr/webhook/vindia";
   const $ = (id) => document.getElementById(id);
-  const body = document.body, orb = $('orb'), stateEl = $('state'),
-        hint = $('hint'), errEl = $('err'), tr = $('transcript');
-  let room = null, connected = false;
+  const body = document.body, orb = $('orb'), stateEl = $('state'), hint = $('hint'),
+        errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn');
 
-  const setState = (s, label) => { body.dataset.state = s; if (label) stateEl.innerHTML = label; };
+  const setState = (s, label) => { body.dataset.state = s; if (label !== undefined) stateEl.innerHTML = label; };
   const addLine = (who, text) => {
     tr.classList.add('show');
     const p = document.createElement('p');
     p.className = who;
-    p.textContent = (who === 'ai' ? 'VindIA : ' : 'Toi : ') + text;
+    p.innerHTML = '<b>' + (who === 'ai' ? 'VindIA' : 'Toi') + '</b> : ' + text;
     tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
   };
 
-  async function start() {
-    errEl.textContent = '';
-    orb.disabled = true; orb.textContent = '…';
-    setState('connecting', 'Connexion…');
+  // --- Synthèse vocale (voix FR du navigateur) ---
+  let frVoice = null;
+  function pickVoice() {
+    const v = speechSynthesis.getVoices();
+    frVoice = v.find(x => /fr-FR/i.test(x.lang)) || v.find(x => /^fr/i.test(x.lang)) || null;
+  }
+  if ('speechSynthesis' in window) {
+    pickVoice();
+    speechSynthesis.onvoiceschanged = pickVoice;
+  }
+  function speak(text) {
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'fr-FR'; if (frVoice) u.voice = frVoice; u.rate = 1.02;
+    u.onstart = () => setState('speaking', '<span class="live">VindIA parle…</span>');
+    u.onend = () => setState('idle', 'Prêt');
+    speechSynthesis.speak(u);
+  }
+
+  // --- Envoi au cerveau (n8n + Mistral) ---
+  async function ask(message) {
+    addLine('you', message);
+    setState('thinking', '<span class="live">VindIA réfléchit…</span>');
+    orb.disabled = true;
     try {
-      const r = await fetch('/token?identity=web-' + Math.floor(Date.now()/1000));
-      if (!r.ok) throw new Error('token ' + r.status);
-      const { url, token } = await r.json();
-
-      room = new LK.Room({ adaptiveStream:true, dynacast:true });
-
-      room.on(LK.RoomEvent.TrackSubscribed, (track) => {
-        if (track.kind === 'audio') {
-          const el = track.attach(); el.autoplay = true; document.body.appendChild(el);
-        }
+      const r = await fetch(WEBHOOK, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message })
       });
-      // Transcriptions live (STT/agent) si l'agent les publie
-      room.on(LK.RoomEvent.TranscriptionReceived, (segs, participant) => {
-        const who = participant && participant.identity === 'vindia-agent' ? 'ai' : 'you';
-        const txt = segs.map(s => s.text).join(' ').trim();
-        if (txt) addLine(who, txt);
-      });
-      room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
-        if (!connected) return;
-        const agentSpeaking = speakers.some(p => p.identity === 'vindia-agent');
-        setState(agentSpeaking ? 'speaking' : 'listening',
-                 agentSpeaking ? '<span class="live">VindIA parle…</span>'
-                               : '<span class="live">À l\'écoute…</span>');
-      });
-      room.on(LK.RoomEvent.Disconnected, () => {
-        connected = false; setState('idle', 'Terminé');
-        orb.disabled = false; orb.textContent = 'Parler'; hint.textContent = 'Appuie pour reparler.';
-      });
-
-      await room.connect(url, token);
-      await room.localParticipant.setMicrophoneEnabled(true);
-      connected = true;
-      orb.disabled = false; orb.textContent = 'Arrêter';
-      hint.textContent = 'Parle naturellement. Réappuie pour arrêter.';
-      setState('listening', '<span class="live">À l\'écoute…</span>');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const reply = (data && data.reply) ? data.reply : "(réponse vide)";
+      addLine('ai', reply);
+      speak(reply);
     } catch (e) {
-      errEl.textContent = 'Connexion impossible : ' + (e.message || e);
-      setState('idle', 'Prêt'); orb.disabled = false; orb.textContent = 'Parler';
+      errEl.textContent = "Problème de connexion : " + (e.message || e);
+      setState('idle', 'Prêt');
+    } finally {
+      orb.disabled = false;
     }
   }
 
-  async function stop() {
-    if (room) { await room.disconnect(); room = null; }
+  // --- Reconnaissance vocale (STT navigateur) ---
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recog = null, listening = false;
+  if (SR) {
+    recog = new SR();
+    recog.lang = 'fr-FR'; recog.interimResults = false; recog.maxAlternatives = 1;
+    recog.onresult = (ev) => {
+      const txt = ev.results[0][0].transcript.trim();
+      if (txt) ask(txt);
+    };
+    recog.onerror = (ev) => {
+      if (ev.error !== 'no-speech' && ev.error !== 'aborted')
+        errEl.textContent = "Micro : " + ev.error;
+      setState('idle', 'Prêt');
+    };
+    recog.onend = () => { listening = false; if (body.dataset.state === 'listening') setState('idle', 'Prêt'); };
+  } else {
+    hint.textContent = "Reconnaissance vocale non dispo sur ce navigateur — utilise la saisie texte ci-dessous.";
   }
 
-  orb.addEventListener('click', () => connected ? stop() : start());
-  if (!LK) { errEl.textContent = 'SDK LiveKit non chargé.'; orb.disabled = true; }
+  orb.addEventListener('click', () => {
+    errEl.textContent = '';
+    if (!recog) { textInput.focus(); return; }
+    if (listening) { recog.stop(); return; }
+    try {
+      speechSynthesis && speechSynthesis.cancel();
+      recog.start(); listening = true;
+      setState('listening', '<span class="live">À l\'écoute…</span>');
+    } catch (e) { /* start déjà en cours */ }
+  });
+
+  function sendText() {
+    const m = textInput.value.trim();
+    if (!m) return;
+    textInput.value = '';
+    ask(m);
+  }
+  sendBtn.addEventListener('click', sendText);
+  textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
 })();
 </script>
 </body>

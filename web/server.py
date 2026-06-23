@@ -45,10 +45,22 @@ async def index(_: web.Request) -> web.Response:
     return web.FileResponse(WEB_DIR / "index.html")
 
 
+# Fichiers statiques de la PWA (liste blanche : pas de traversée de répertoire).
+_STATIC = {"manifest.json", "sw.js", "icon-192.png", "icon-512.png"}
+
+
+async def static_file(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    if name not in _STATIC:
+        return web.Response(status=404)
+    return web.FileResponse(WEB_DIR / name)
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/token", token)
+    app.router.add_get("/{name}", static_file)
     return app
 
 

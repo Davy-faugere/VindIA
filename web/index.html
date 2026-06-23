@@ -4,6 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>VindIA — assistant vocal</title>
+<meta name="theme-color" content="#4F46E5" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="VindIA" />
 <style>
   :root{
     --primary:#4F46E5; --primary-hover:#4338CA; --accent:#8B5CF6;
@@ -72,11 +78,11 @@
 
     <div class="orb-wrap">
       <span class="ring"></span>
-      <button id="orb" class="orb">Parler</button>
+      <button id="orb" class="orb">Démarrer</button>
     </div>
 
     <div class="state" id="state">Prêt</div>
-    <p class="hint" id="hint">Appuie sur « Parler » et pose ta question à voix haute.</p>
+    <p class="hint" id="hint">Appuie une fois, puis parle librement — VindIA t'écoute et te répond en continu.</p>
     <div class="err" id="err"></div>
 
     <div class="transcript" id="transcript"></div>
@@ -105,31 +111,48 @@
     tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
   };
 
-  // --- Synthèse vocale (voix FR du navigateur) ---
+  // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;
   function pickVoice() {
-    const v = speechSynthesis.getVoices();
-    frVoice = v.find(x => /fr-FR/i.test(x.lang)) || v.find(x => /^fr/i.test(x.lang)) || null;
+    const v = speechSynthesis.getVoices().filter(x => /^fr/i.test(x.lang));
+    if (!v.length) return;
+    const score = (x) => {
+      const n = (x.name || '').toLowerCase();
+      let s = 0;
+      if (n.includes('google')) s += 5;                 // voix réseau Google = douces/naturelles
+      if (/natural|enhanced|premium|neural|wavenet/.test(n)) s += 4;
+      if (/am[ée]lie|audrey|marie|virginie|c[ée]line|julie|l[ée]a/.test(n)) s += 3; // voix féminines douces
+      if (/fr-fr/i.test(x.lang)) s += 1;
+      if (x.localService) s -= 1;                        // les locales (eSpeak) sont robotiques
+      return s;
+    };
+    frVoice = v.slice().sort((a, b) => score(b) - score(a))[0];
   }
   if ('speechSynthesis' in window) {
     pickVoice();
     speechSynthesis.onvoiceschanged = pickVoice;
   }
-  function speak(text) {
-    if (!('speechSynthesis' in window)) return;
+  function speak(text, after) {
+    if (!('speechSynthesis' in window)) { if (after) after(); return; }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'fr-FR'; if (frVoice) u.voice = frVoice; u.rate = 1.02;
+    u.lang = 'fr-FR'; if (frVoice) u.voice = frVoice;
+    u.rate = 0.95;    // un peu plus posé
+    u.pitch = 1.1;    // légèrement plus haut = plus doux
     u.onstart = () => setState('speaking', '<span class="live">VindIA parle…</span>');
-    u.onend = () => setState('idle', 'Prêt');
+    u.onend = () => { setState('idle', 'Prêt'); if (after) after(); };
+    u.onerror = () => { if (after) after(); };
     speechSynthesis.speak(u);
   }
+
+  // --- Mode mains-libres : on garde la conversation ouverte ---
+  let conversing = false;
+  const resumeIfConversing = () => { if (conversing) startListening(); };
 
   // --- Envoi au cerveau (n8n + Mistral) ---
   async function ask(message) {
     addLine('you', message);
     setState('thinking', '<span class="live">VindIA réfléchit…</span>');
-    orb.disabled = true;
     try {
       const r = await fetch(WEBHOOK, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -139,45 +162,63 @@
       const data = await r.json();
       const reply = (data && data.reply) ? data.reply : "(réponse vide)";
       addLine('ai', reply);
-      speak(reply);
+      speak(reply, resumeIfConversing);   // quand il a fini de parler, il se remet à écouter
     } catch (e) {
       errEl.textContent = "Problème de connexion : " + (e.message || e);
       setState('idle', 'Prêt');
-    } finally {
-      orb.disabled = false;
+      resumeIfConversing();
     }
   }
 
   // --- Reconnaissance vocale (STT navigateur) ---
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let recog = null, listening = false;
+  let recog = null;
+  function startListening() {
+    if (!recog || !conversing) return;
+    try {
+      speechSynthesis && speechSynthesis.cancel();
+      recog.start();
+      setState('listening', '<span class="live">À l\'écoute…</span>');
+    } catch (e) { /* déjà en cours */ }
+  }
   if (SR) {
     recog = new SR();
     recog.lang = 'fr-FR'; recog.interimResults = false; recog.maxAlternatives = 1;
     recog.onresult = (ev) => {
       const txt = ev.results[0][0].transcript.trim();
-      if (txt) ask(txt);
+      if (txt) ask(txt); else resumeIfConversing();
     };
     recog.onerror = (ev) => {
       if (ev.error !== 'no-speech' && ev.error !== 'aborted')
         errEl.textContent = "Micro : " + ev.error;
-      setState('idle', 'Prêt');
     };
-    recog.onend = () => { listening = false; if (body.dataset.state === 'listening') setState('idle', 'Prêt'); };
+    // fin d'un cycle d'écoute (silence) → on relance tant que la conversation est ouverte
+    recog.onend = () => { if (conversing && body.dataset.state === 'listening') setTimeout(startListening, 250); };
   } else {
     hint.textContent = "Reconnaissance vocale non dispo sur ce navigateur — utilise la saisie texte ci-dessous.";
+  }
+
+  function startConversation() {
+    conversing = true; orb.textContent = 'Arrêter';
+    hint.textContent = "Parle quand tu veux — je t'écoute en continu.";
+    startListening();
+  }
+  function stopConversation() {
+    conversing = false; orb.textContent = 'Démarrer';
+    if (recog) recog.stop();
+    speechSynthesis && speechSynthesis.cancel();
+    setState('idle', 'Prêt');
+    hint.textContent = "Conversation en pause. Appuie pour reprendre.";
   }
 
   orb.addEventListener('click', () => {
     errEl.textContent = '';
     if (!recog) { textInput.focus(); return; }
-    if (listening) { recog.stop(); return; }
-    try {
-      speechSynthesis && speechSynthesis.cancel();
-      recog.start(); listening = true;
-      setState('listening', '<span class="live">À l\'écoute…</span>');
-    } catch (e) { /* start déjà en cours */ }
+    conversing ? stopConversation() : startConversation();
   });
+
+  // PWA : enregistrement du service worker (installable comme une app)
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
   function sendText() {
     const m = textInput.value.trim();

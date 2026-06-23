@@ -272,8 +272,9 @@
   }
   function stopConversation() {
     conversing = false; orb.textContent = 'Démarrer';
-    if (recog) recog.stop();
-    speechSynthesis && speechSynthesis.cancel();
+    if (recog) { try { recog.abort(); } catch (e) {} }
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix edge-tts en cours
     setState('idle', 'Prêt');
     hint.textContent = "Conversation en pause. Appuie pour reprendre.";
   }

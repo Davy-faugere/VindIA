@@ -9,4 +9,5 @@ mistralai>=1.5,<2
 # Runtime live (installés sur le VPS / dans un venv ; cf. docs) :
 # livekit             # client temps réel
 # livekit-api         # mint de tokens
-# piper-tts           # TTS souverain FR self-host (voix fr_FR-siwis-medium)
+# piper-tts           # TTS souverain FR self-host (alternative)
+edge-tts              # voix neurale FR (gratuite) servie par web/server.py /tts

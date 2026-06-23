@@ -98,6 +98,12 @@
 <script>
 (() => {
   const WEBHOOK = "https://n8n.faugere-davy.fr/webhook/vindia";
+  // Code d'accès (verrou) : demandé une fois, gardé localement sur l'appareil.
+  function getCode() {
+    let c = localStorage.getItem('vindia_code');
+    if (!c) { c = (prompt("Code d'accès VindIA :") || '').trim(); if (c) localStorage.setItem('vindia_code', c); }
+    return c;
+  }
   const $ = (id) => document.getElementById(id);
   const body = document.body, orb = $('orb'), stateEl = $('state'), hint = $('hint'),
         errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn');
@@ -156,8 +162,9 @@
     try {
       const r = await fetch(WEBHOOK, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
+        body: JSON.stringify({ message, code: getCode() })
       });
+      if (r.status === 401) { localStorage.removeItem('vindia_code'); throw new Error("code d'accès refusé"); }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const reply = (data && data.reply) ? data.reply : "(réponse vide)";

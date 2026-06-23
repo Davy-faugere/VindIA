@@ -108,6 +108,17 @@
   const body = document.body, orb = $('orb'), stateEl = $('state'), hint = $('hint'),
         errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn');
 
+  // Retire tout markdown/symbole pénible (astérisques, gras, titres, puces, liens)
+  const clean = (t) => (t || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*/g, '')
+    .replace(/`+/g, '')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/^\s*[-•]\s+/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+
   const setState = (s, label) => { body.dataset.state = s; if (label !== undefined) stateEl.innerHTML = label; };
   const addLine = (who, text) => {
     tr.classList.add('show');
@@ -167,7 +178,7 @@
       if (r.status === 401) { localStorage.removeItem('vindia_code'); throw new Error("code d'accès refusé"); }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
-      const reply = (data && data.reply) ? data.reply : "(réponse vide)";
+      const reply = clean((data && data.reply) ? data.reply : "(réponse vide)");
       addLine('ai', reply);
       speak(reply, resumeIfConversing);   // quand il a fini de parler, il se remet à écouter
     } catch (e) {

@@ -6,9 +6,33 @@ des fakes en test. Le runtime applique le garde-fou consentement et émet l'audi
 
 from __future__ import annotations
 
+import re
 from typing import Awaitable, Callable, Dict, Optional, Protocol, Tuple
 
 from .session import SessionDescriptor
+
+# Séquence de substitutions pour rendre un texte LLM sûr pour la synthèse vocale.
+# Appliquées dans l'ordre : du plus spécifique au plus général.
+_TTS_CLEANERS = [
+    (re.compile(r'\[([^\]]+)\]\([^\)]*\)'), r'\1'),  # [texte](url) → texte
+    (re.compile(r'```.*?```', re.S), ''),             # blocs de code
+    (re.compile(r'`([^`]+)`'), r'\1'),               # inline code
+    (re.compile(r'\*\*(.+?)\*\*', re.S), r'\1'),     # **gras**
+    (re.compile(r'\*(.+?)\*', re.S), r'\1'),         # *italique*
+    (re.compile(r'_(.+?)_', re.S), r'\1'),           # _italique_
+    (re.compile(r'^#{1,6}\s+', re.M), ''),           # ## titres
+    (re.compile(r'^\s*[-*+]\s+', re.M), ''),         # - listes
+    (re.compile(r'^\s*\d+\.\s+', re.M), ''),         # 1. listes numérotées
+    (re.compile(r'^\s*>\s*', re.M), ''),             # > citations
+    (re.compile(r'\n{3,}'), '\n\n'),                  # sauts de ligne excessifs
+]
+
+
+def _clean_for_tts(text: str) -> str:
+    """Retire le markdown d'un texte LLM avant synthèse vocale."""
+    for pattern, repl in _TTS_CLEANERS:
+        text = pattern.sub(repl, text)
+    return text.strip()
 
 
 class STT(Protocol):
@@ -77,9 +101,12 @@ class ConversationRuntime:
             return
 
         reply = await self._llm.reply(text, session_id=session_id)
-        speech = await self._tts.synthesize(reply, desc.locale)
+        # Nettoyage markdown avant synthèse : les **, #, - sont lus à voix haute
+        # par le TTS sans ce filtre.
+        tts_text = _clean_for_tts(reply)
+        speech = await self._tts.synthesize(tts_text, desc.locale)
         await room_out.play(speech)
-        self._emit(session_id, "reply", {"text": reply})
+        self._emit(session_id, "reply", {"text": tts_text})
 
     def _emit(self, session_id: str, event_type: str, payload: dict) -> None:
         if self._audit is not None:

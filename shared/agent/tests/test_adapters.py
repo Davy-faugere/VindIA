@@ -40,8 +40,51 @@ class MistralLLMTest(unittest.TestCase):
             captured["messages"] = list(messages)
             return "ok"
 
-        asyncio.run(MistralLLM(transport=fake).reply("salut", session_id="s1"))
+        # system_prompt=None explicite pour désactiver le prompt par défaut.
+        asyncio.run(MistralLLM(transport=fake, system_prompt=None).reply("salut", session_id="s1"))
         self.assertEqual(captured["messages"], [{"role": "user", "content": "salut"}])
+
+    def test_default_system_prompt_is_vindia(self):
+        from shared.agent.adapters import VINDIA_SYSTEM_PROMPT
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        asyncio.run(MistralLLM(transport=fake).reply("bonjour", session_id="s1"))
+        self.assertEqual(captured["messages"][0]["role"], "system")
+        self.assertEqual(captured["messages"][0]["content"], VINDIA_SYSTEM_PROMPT)
+        self.assertEqual(captured["messages"][-1], {"role": "user", "content": "bonjour"})
+
+    def test_history_accumulates_across_turns(self):
+        calls = []
+
+        async def fake(messages):
+            calls.append([m.copy() for m in messages])
+            return f"r{len(calls)}"
+
+        llm = MistralLLM(transport=fake, system_prompt=None)
+        asyncio.run(llm.reply("tour1", session_id="s1"))
+        asyncio.run(llm.reply("tour2", session_id="s1"))
+
+        # 2e appel : [user:tour1, assistant:r1, user:tour2]
+        second = calls[1]
+        self.assertEqual(second[0], {"role": "user", "content": "tour1"})
+        self.assertEqual(second[1], {"role": "assistant", "content": "r1"})
+        self.assertEqual(second[2], {"role": "user", "content": "tour2"})
+
+    def test_history_bounded_by_max_history(self):
+        async def fake(messages):
+            return "x"
+
+        llm = MistralLLM(transport=fake, system_prompt=None, max_history=2)
+        for i in range(10):
+            asyncio.run(llm.reply(f"t{i}", session_id="s1"))
+
+        # max_history=2 → au plus 4 messages d'historique (2 tours × 2)
+        history = llm._history["s1"]
+        self.assertLessEqual(len(history), 4)
 
     def test_without_transport_fails_fast(self):
         # Pas de transport injecté + ni lib ni clé en CI → erreur claire, pas un crash obscur.

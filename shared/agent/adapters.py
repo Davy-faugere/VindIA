@@ -81,15 +81,19 @@ class MistralLLM:
         self._model = model
         self._system_prompt = system_prompt
         self._max_history = max_history
-        # Historique par session : deque de (role, content) bornée à max_history tours.
+        # Historique par session : deque bornée à max_history tours (user+assistant).
         self._history: Dict[str, Deque[dict]] = {}
+        # Contexte mémorisé long-terme injecté par MemoryStore à l'ouverture de session.
+        self._memory_context: Dict[str, str] = {}
         self._client = None  # mémoïsé au 1er appel live
 
     async def reply(self, text: str, *, session_id: str) -> str:
         history = self._history.get(session_id, deque(maxlen=self._max_history * 2))
         messages: list[dict] = []
-        if self._system_prompt:
-            messages.append({"role": "system", "content": self._system_prompt})
+        # System = prompt de base + mémoire long-terme (si chargée pour la session).
+        parts = [p for p in (self._system_prompt, self._memory_context.get(session_id)) if p]
+        if parts:
+            messages.append({"role": "system", "content": "\n\n".join(parts)})
         messages.extend(history)
         messages.append({"role": "user", "content": text})
         transport = self._transport or self._live_transport()
@@ -99,6 +103,20 @@ class MistralLLM:
         history.append({"role": "assistant", "content": response})
         self._history[session_id] = history
         return response
+
+    def load_memory(self, session_id: str, context: str) -> None:
+        """Injecte la mémoire long-terme d'un membre (appelé par le runtime à open())."""
+        self._memory_context[session_id] = context
+
+    def unload_memory(self, session_id: str) -> None:
+        """Libère la mémoire et l'historique d'une session fermée."""
+        self._memory_context.pop(session_id, None)
+        self._history.pop(session_id, None)
+
+    def get_history(self, session_id: str) -> list:
+        """Retourne l'historique de la session (pour extraction en fin de session)."""
+        h = self._history.get(session_id)
+        return list(h) if h else []
 
     def _live_transport(self) -> LlmTransport:
         async def _call(messages: Sequence[dict]) -> str:  # pragma: no cover - live

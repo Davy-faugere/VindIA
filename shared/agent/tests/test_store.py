@@ -4,7 +4,7 @@ import unittest
 from shared.agent.ids import is_valid_id
 from shared.agent.store import Store, make_audit_sink, make_member_resolver
 
-# Schéma SQLite minimal, miroir de db/01-schema.sql (CHAR(36) -> TEXT).
+# Schéma SQLite minimal, miroir de db/01-schema.sql + db/02-memories.sql.
 _SQLITE_SCHEMA = """
 CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE members (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, display_name TEXT);
@@ -16,6 +16,11 @@ CREATE TABLE speaker_bindings (
 CREATE TABLE audit_log (
   id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, session_id TEXT,
   event_type TEXT NOT NULL, payload TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE member_memories (
+  id TEXT PRIMARY KEY, member_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+  source_session_id TEXT, content TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -65,6 +70,19 @@ class StoreTest(unittest.TestCase):
         sink("sess-1", "reply", {"text": "salut"})
         self.assertEqual(s.audit_count("sess-1"), 2)
         self.assertEqual(s.audit_count("sess-x"), 0)
+
+    def test_save_and_get_memories(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid, "Davy")
+        s.save_memory(mid, tid, "sess-1", "Distributeur MLM depuis 6 mois")
+        s.save_memory(mid, tid, "sess-1", "Équipe de 5 filleuls")
+        rows = s.get_memories(mid)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("Distributeur MLM depuis 6 mois", rows)
+
+    def test_get_memories_empty_for_unknown_member(self):
+        self.assertEqual(fresh_store().get_memories("inconnu"), [])
 
 
 if __name__ == "__main__":

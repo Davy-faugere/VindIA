@@ -86,6 +86,46 @@ class MistralLLMTest(unittest.TestCase):
         history = llm._history["s1"]
         self.assertLessEqual(len(history), 4)
 
+    def test_load_memory_injected_into_system(self):
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        llm = MistralLLM(transport=fake, system_prompt="Base.")
+        llm.load_memory("s1", "[Mémoire]\n- Davy est distributeur MLM")
+        asyncio.run(llm.reply("bonjour", session_id="s1"))
+
+        system_content = captured["messages"][0]["content"]
+        self.assertIn("Base.", system_content)
+        self.assertIn("[Mémoire]", system_content)
+
+    def test_unload_memory_clears_context_and_history(self):
+        async def fake(messages):
+            return "ok"
+
+        llm = MistralLLM(transport=fake, system_prompt=None)
+        llm.load_memory("s1", "contexte")
+        asyncio.run(llm.reply("test", session_id="s1"))
+        llm.unload_memory("s1")
+
+        self.assertEqual(llm.get_history("s1"), [])
+        self.assertNotIn("s1", llm._memory_context)
+
+    def test_get_history_returns_accumulated_turns(self):
+        async def fake(messages):
+            return "r"
+
+        llm = MistralLLM(transport=fake, system_prompt=None)
+        asyncio.run(llm.reply("q1", session_id="s1"))
+        asyncio.run(llm.reply("q2", session_id="s1"))
+
+        h = llm.get_history("s1")
+        self.assertEqual(len(h), 4)  # user, assistant, user, assistant
+        self.assertEqual(h[0], {"role": "user", "content": "q1"})
+        self.assertEqual(h[1], {"role": "assistant", "content": "r"})
+
     def test_without_transport_fails_fast(self):
         # Pas de transport injecté + ni lib ni clé en CI → erreur claire, pas un crash obscur.
         with self.assertRaises(RuntimeError):

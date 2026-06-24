@@ -91,6 +91,90 @@ class ConversationRuntimeTest(unittest.TestCase):
         self.assertIn(("s1", "session_closed"), events)
 
 
+class MemoryIntegrationTest(unittest.TestCase):
+    def test_memory_context_loaded_at_open(self):
+        """À l'ouverture, la mémoire du membre est injectée dans le LLM."""
+        injected = {}
+
+        class TrackingLLM:
+            def load_memory(self, session_id, ctx):
+                injected["session_id"] = session_id
+                injected["ctx"] = ctx
+
+            async def reply(self, text, *, session_id):
+                return "ok"
+
+        class FakeMemory:
+            def load_context(self, member_id):
+                return f"[Mémoire de {member_id}]"
+
+        async def scenario():
+            rt = ConversationRuntime(FakeSTT(), TrackingLLM(), FakeTTS(), memory=FakeMemory())
+            desc = SessionDescriptor("s1", "t1", "r", member_id="m1", consent_granted=True)
+            await rt.open(desc, FakeRoomOut())
+
+        asyncio.run(scenario())
+        self.assertEqual(injected.get("session_id"), "s1")
+        self.assertIn("m1", injected.get("ctx", ""))
+
+    def test_memory_not_loaded_when_no_member(self):
+        """Pas de membre résolu → pas d'injection mémoire."""
+        injected = {}
+
+        class TrackingLLM:
+            def load_memory(self, session_id, ctx):
+                injected["called"] = True
+
+            async def reply(self, text, *, session_id):
+                return "ok"
+
+        class FakeMemory:
+            def load_context(self, member_id):
+                return "context"
+
+        async def scenario():
+            rt = ConversationRuntime(FakeSTT(), TrackingLLM(), FakeTTS(), memory=FakeMemory())
+            # member_id=None → pas d'injection
+            desc = SessionDescriptor("s1", "t1", "r", member_id=None, consent_granted=True)
+            await rt.open(desc, FakeRoomOut())
+
+        asyncio.run(scenario())
+        self.assertNotIn("called", injected)
+
+    def test_memory_extracted_at_close(self):
+        """À la fermeture, l'historique est extrait (fire-and-forget)."""
+        extracted = []
+
+        class TrackingLLM:
+            def get_history(self, session_id):
+                return [{"role": "user", "content": "test"}]
+
+            def unload_memory(self, session_id):
+                pass
+
+            async def reply(self, text, *, session_id):
+                return "ok"
+
+        class FakeMemory:
+            def load_context(self, member_id):
+                return ""
+
+            async def extract_and_save(self, member_id, tenant_id, session_id, history):
+                extracted.append({"mid": member_id, "n": len(history)})
+                return len(history)
+
+        async def scenario():
+            rt = ConversationRuntime(FakeSTT(), TrackingLLM(), FakeTTS(), memory=FakeMemory())
+            desc = SessionDescriptor("s1", "t1", "r", member_id="m1", consent_granted=True)
+            await rt.open(desc, FakeRoomOut())
+            rt.close("s1")
+            await asyncio.sleep(0)  # donne un tick à la tâche fire-and-forget
+
+        asyncio.run(scenario())
+        self.assertEqual(len(extracted), 1)
+        self.assertEqual(extracted[0]["mid"], "m1")
+
+
 class CleanForTTSTest(unittest.TestCase):
     def test_strips_bold(self):
         self.assertEqual(_clean_for_tts("Voici **important** ici."), "Voici important ici.")

@@ -92,6 +92,26 @@ class Store:
         )
         return int(cur.fetchone()[0])
 
+    # --- mémoire long-terme par membre ---
+    def get_memories(self, member_id: str) -> list:
+        cur = self._exec(
+            "SELECT content FROM member_memories WHERE member_id = ? ORDER BY created_at ASC",
+            (member_id,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+    def save_memory(
+        self, member_id: str, tenant_id: str, session_id: Optional[str], content: str
+    ) -> str:
+        mid = new_id()
+        self._exec(
+            "INSERT INTO member_memories "
+            "(id, member_id, tenant_id, source_session_id, content) VALUES (?, ?, ?, ?, ?)",
+            (mid, member_id, tenant_id, session_id, content),
+        )
+        self._conn.commit()
+        return mid
+
 
 def make_member_resolver(store: Store, session_id: str):
     """Adapte le store en résolveur (tenant_id, speaker_id) -> member_id pour la session."""

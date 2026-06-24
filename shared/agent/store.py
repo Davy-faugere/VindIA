@@ -92,6 +92,26 @@ class Store:
         )
         return int(cur.fetchone()[0])
 
+    # --- bootstrap idempotent ---
+    def ensure_tenant(self, tenant_id: str, name: str) -> None:
+        """INSERT ignore si le tenant existe déjà."""
+        try:
+            self._exec("INSERT INTO tenants (id, name) VALUES (?, ?)", (tenant_id, name))
+            self._conn.commit()
+        except Exception:
+            pass
+
+    def ensure_member(self, member_id: str, tenant_id: str, display_name: str) -> None:
+        """INSERT ignore si le membre existe déjà."""
+        try:
+            self._exec(
+                "INSERT INTO members (id, tenant_id, display_name) VALUES (?, ?, ?)",
+                (member_id, tenant_id, display_name),
+            )
+            self._conn.commit()
+        except Exception:
+            pass
+
     # --- mémoire long-terme par membre ---
     def get_memories(self, member_id: str) -> list:
         cur = self._exec(

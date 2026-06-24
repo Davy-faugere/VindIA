@@ -72,6 +72,21 @@
   .dl:active{background:var(--primary-hover)}
   .switch{margin-top:16px; background:none; border:none; color:var(--muted); font:inherit;
     font-size:12.5px; text-decoration:underline; cursor:pointer}
+  .pending{display:none; margin-top:16px; text-align:left; background:#fff;
+    border:1.5px solid var(--accent); border-radius:14px; padding:13px 15px;
+    box-shadow:0 8px 22px rgba(139,92,246,.16)}
+  .pending.show{display:block}
+  .pending-text{font-size:15px; line-height:1.5; color:var(--text); min-height:21px; margin-bottom:11px}
+  .pending-text:empty::before{content:'…'; color:var(--muted)}
+  .pending-actions{display:flex; gap:8px}
+  .pbtn{flex:1; padding:11px; border:none; border-radius:11px; font:inherit; font-size:14px; font-weight:700; cursor:pointer}
+  .pbtn.cancel{background:#f1f1f7; color:var(--text)}
+  .pbtn.cancel:active{background:#e7e7f0}
+  .pbtn.send{background:var(--primary); color:#fff}
+  .pbtn.send:active{background:var(--primary-hover)}
+  .pending-bar{height:3px; background:#ececf6; border-radius:3px; margin-top:11px; overflow:hidden}
+  .pending-bar span{display:block; height:100%; width:100%; background:var(--accent); transform-origin:left}
+  .pending-bar span.run{transition:transform var(--confirm,4000ms) linear; transform:scaleX(0)}
   .err{color:#b91c1c; font-size:13px; margin-top:12px; min-height:18px}
   footer{margin-top:18px; font-size:11px; color:var(--muted)}
 </style>
@@ -79,7 +94,7 @@
 <body data-state="idle">
   <main class="card">
     <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
-    <p class="sub">Assistant vocal — en français</p>
+    <p class="sub" id="sub">Assistant vocal — en français</p>
 
     <div class="orb-wrap">
       <span class="ring"></span>
@@ -89,6 +104,15 @@
     <div class="state" id="state">Prêt</div>
     <p class="hint" id="hint">Appuie une fois, puis parle librement — VindIA t'écoute et te répond en continu.</p>
     <div class="err" id="err"></div>
+
+    <div class="pending" id="pending">
+      <div class="pending-text" id="pendingText"></div>
+      <div class="pending-actions">
+        <button id="cancelBtn" class="pbtn cancel">Annuler</button>
+        <button id="sendNowBtn" class="pbtn send">Envoyer</button>
+      </div>
+      <div class="pending-bar"><span id="pendingFill"></span></div>
+    </div>
 
     <div class="transcript" id="transcript"></div>
 
@@ -103,7 +127,6 @@
 
 <script>
 (() => {
-  const WEBHOOK = "https://n8n.faugere-davy.fr/webhook/vindia";
   // Code d'accès (verrou) : demandé une fois, gardé localement sur l'appareil.
   function getCode() {
     let c = localStorage.getItem('vindia_code');
@@ -112,31 +135,86 @@
   }
   const $ = (id) => document.getElementById(id);
   const body = document.body, orb = $('orb'), stateEl = $('state'), hint = $('hint'),
-        errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn');
+        errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn'),
+        sub = $('sub');
 
-  // Retire tout markdown/symbole pénible (astérisques, gras, titres, puces, liens)
+  // ── Identification au démarrage ───────────────────────────────────────────
+  let _displayName = '';
+  async function resolveIdentity(code) {
+    if (!code) return;
+    try {
+      const r = await fetch('/auth?code=' + encodeURIComponent(code));
+      if (r.status === 401) { localStorage.removeItem('vindia_code'); return; }
+      const d = await r.json();
+      if (d.ok) {
+        _displayName = d.display_name || '';
+        sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
+        if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
+      }
+    } catch (e) { /* serveur non dispo : mode dégradé silencieux */ }
+  }
+  resolveIdentity(localStorage.getItem('vindia_code') || getCode());
+
+  // Retire tout markdown/symbole (Mistral désobéit au prompt, on nettoie côté client)
   const clean = (t) => (t || '')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*/g, '')
-    .replace(/`+/g, '')
-    .replace(/^#{1,6}\s*/gm, '')
-    .replace(/^\s*[-•]\s+/gm, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')          // **gras** → texte
+    .replace(/\*([^*]+)\*/g, '$1')              // *italique* → texte
+    .replace(/__([^_]+)__/g, '$1')              // __gras__ → texte
+    .replace(/_([^_]+)_/g, '$1')               // _italique_ → texte
+    .replace(/~~([^~]+)~~/g, '$1')             // ~~barré~~ → texte
+    .replace(/`+/g, '')                         // backticks
+    .replace(/^#{1,6}\s*/gm, '')               // titres
+    .replace(/^\s*[-•*]\s+/gm, '')             // puces
+    .replace(/^\s*\d+\.\s+/gm, '')             // listes numérotées (1. 2. 3.)
+    .replace(/^\s*>\s*/gm, '')                 // blockquotes
+    .replace(/\|[^\n]+\|/g, '')                // lignes de tableaux |col|col|
+    .replace(/^[-|: ]+$/gm, '')               // séparateurs de tableaux
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [liens](url) → texte
+    .replace(/—/g, ',')                        // tiret em (lu "tiret" par la voix)
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{FE00}-\u{FE0F}\u{20E3}\u{200D}]/gu, '')
+    .replace(/\n{2,}/g, '. ')                  // sauts de ligne multiples → pause naturelle
     .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ ([,.!?;:])/g, '$1')
     .trim();
 
-  // Propose un fichier genere au telechargement (cote client, rien stocke serveur)
-  function offerDownload(name, content) {
-    const ext = (name.split('.').pop() || 'txt').toLowerCase();
-    const mimes = { md:'text/markdown', csv:'text/csv', json:'application/json',
-      sh:'text/x-shellscript', bash:'text/x-shellscript', txt:'text/plain', yml:'text/yaml', yaml:'text/yaml' };
-    const blob = new Blob([content], { type: (mimes[ext] || 'text/plain') + ';charset=utf-8' });
+  // Ajoute le bouton de telechargement pour un blob deja pret
+  function addDownloadButton(name, blob) {
     const url = URL.createObjectURL(blob);
     tr.classList.add('show');
     const p = document.createElement('p');
     const a = document.createElement('a');
     a.href = url; a.download = name; a.className = 'dl'; a.textContent = 'Telecharger ' + name;
     p.appendChild(a); tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
+  }
+
+  // Formats bureautiques construits cote serveur (vrais binaires Word/Excel/PowerPoint/PDF)
+  const OFFICE = ['docx', 'xlsx', 'pptx', 'pdf'];
+
+  // Propose un fichier genere au telechargement.
+  // Texte -> blob cote client. Bureautique -> /build cote serveur (rien stocke).
+  async function offerDownload(name, content) {
+    const ext = (name.split('.').pop() || 'txt').toLowerCase();
+    if (OFFICE.includes(ext)) {
+      try {
+        const r = await fetch('/build', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, content: content })
+        });
+        if (!r.ok) throw new Error('build ' + r.status);
+        addDownloadButton(name, await r.blob());
+        return;
+      } catch (e) {
+        // Repli : on livre le contenu brut en .txt pour ne rien perdre
+        const fb = name.replace(/\.[^.]+$/, '') + '.txt';
+        addDownloadButton(fb, new Blob([content], { type: 'text/plain;charset=utf-8' }));
+        return;
+      }
+    }
+    const mimes = { md:'text/markdown', csv:'text/csv', json:'application/json',
+      sh:'text/x-shellscript', bash:'text/x-shellscript', txt:'text/plain', yml:'text/yaml', yaml:'text/yaml' };
+    const blob = new Blob([content], { type: (mimes[ext] || 'text/plain') + ';charset=utf-8' });
+    addDownloadButton(name, blob);
   }
 
   const setState = (s, label) => { body.dataset.state = s; if (label !== undefined) stateEl.innerHTML = label; };
@@ -180,26 +258,69 @@
     u.onerror = () => { if (after) after(); };
     speechSynthesis.speak(u);
   }
-  // Voix principale : edge-tts (neurale, douce), servie par /tts
+  // Voix principale : edge-tts (neurale, douce), servie par /tts.
+  // Jouée PHRASE PAR PHRASE : la 1re (courte) démarre quasi instantanément,
+  // les suivantes se synthétisent en arrière-plan pendant qu'on parle.
   let currentAudio = null;
-  async function speak(text, after) {
-    try {
-      if ('speechSynthesis' in window) speechSynthesis.cancel();
-      if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-      setState('speaking', '<span class="live">VindIA parle…</span>');
-      const r = await fetch('/tts', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
-      });
-      if (!r.ok) throw new Error('tts ' + r.status);
-      const blob = await r.blob();
-      const audio = new Audio(URL.createObjectURL(blob));
+  let speakToken = 0;   // invalide une lecture en cours quand on en lance/annule une autre
+
+  // Découpe en phrases ; fusionne les fragments trop courts pour ne pas hacher la voix
+  function splitSentences(text) {
+    const raw = (text.match(/[^.!?…]+[.!?…]+|\S[^.!?…]*$/g) || [text]).map(s => s.trim()).filter(Boolean);
+    const out = [];
+    for (const s of raw) {
+      if (out.length && (out[out.length - 1].length < 28 || s.length < 16)) out[out.length - 1] += ' ' + s;
+      else out.push(s);
+    }
+    return out.length ? out : [text];
+  }
+
+  function ttsUrl(text) {
+    return fetch('/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+      .then(r => { if (!r.ok) throw new Error('tts ' + r.status); return r.blob(); })
+      .then(b => URL.createObjectURL(b));
+  }
+
+  function playUrl(url) {
+    return new Promise((resolve, reject) => {
+      const audio = new Audio(url);
       currentAudio = audio;
-      audio.onended = () => { setState('idle', 'Prêt'); if (after) after(); };
-      audio.onerror = () => { setState('idle', 'Prêt'); if (after) after(); };
-      await audio.play();
+      let done = false;
+      const finish = (ok) => {
+        if (done) return; done = true;
+        URL.revokeObjectURL(url);
+        ok ? resolve() : reject(new Error('audio'));
+      };
+      // Fin naturelle ET annulation passent par 'ended'/'pause' : phrase terminée, pas une erreur.
+      audio.onended = () => finish(true);
+      audio.onpause = () => finish(true);
+      audio.onerror = () => finish(false);
+      audio.play().catch(() => finish(false));
+    });
+  }
+
+  async function speak(text, after) {
+    const myToken = ++speakToken;
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
+    setState('speaking', '<span class="live">VindIA parle…</span>');
+    const parts = splitSentences(text);
+    let nextUrl = ttsUrl(parts[0]);   // lance la synthèse de la 1re phrase tout de suite
+    let played = false;
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        const url = await nextUrl;
+        if (myToken !== speakToken) { URL.revokeObjectURL(url); return; }   // annulé
+        if (i + 1 < parts.length) nextUrl = ttsUrl(parts[i + 1]);           // prépare la suivante
+        await playUrl(url);
+        if (myToken !== speakToken) return;                                 // annulé en cours
+        played = true;
+      }
+      setState('idle', 'Prêt'); if (after) after();
     } catch (e) {
-      browserSpeak(text, after);   // secours voix navigateur
+      if (myToken !== speakToken) return;            // annulation volontaire : on ne fait rien
+      if (!played) { browserSpeak(text, after); }    // rien joué -> secours voix navigateur
+      else { setState('idle', 'Prêt'); if (after) after(); }
     }
   }
 
@@ -207,12 +328,12 @@
   let conversing = false;
   const resumeIfConversing = () => { if (conversing) startListening(); };
 
-  // --- Envoi au cerveau (n8n + Mistral) ---
+  // --- Envoi au cerveau (Mistral direct via /ask, avec mémoire long-terme) ---
   async function ask(message) {
     addLine('you', message);
     setState('thinking', '<span class="live">VindIA réfléchit…</span>');
     try {
-      const r = await fetch(WEBHOOK, {
+      const r = await fetch('/ask', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, code: getCode() })
       });
@@ -237,44 +358,97 @@
     }
   }
 
-  // --- Reconnaissance vocale (STT navigateur) ---
+  // --- Reconnaissance vocale (STT navigateur), tolérante aux pauses ---
+  const pending = $('pending'), pendingText = $('pendingText'),
+        pendingFill = $('pendingFill'), cancelBtn = $('cancelBtn'), sendNowBtn = $('sendNowBtn');
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let recog = null;
+  const SILENCE_MS = 2500;   // silence requis avant de proposer l'envoi (généreux : ne coupe pas aux pauses)
+  const CONFIRM_MS = 4500;   // fenêtre pour annuler/corriger avant l'envoi automatique
+  let recog = null, finalBuf = '', silenceTimer = null, confirmTimer = null, phase = 'idle';
+  pending.style.setProperty('--confirm', CONFIRM_MS + 'ms');
+
+  const clearTimers = () => { clearTimeout(silenceTimer); clearTimeout(confirmTimer); silenceTimer = confirmTimer = null; };
+  const hidePending = () => { pending.classList.remove('show'); pendingText.textContent = ''; pendingFill.classList.remove('run'); };
+
   function startListening() {
     if (!recog || !conversing) return;
-    try {
-      speechSynthesis && speechSynthesis.cancel();
-      recog.start();
-      setState('listening', '<span class="live">À l\'écoute…</span>');
-    } catch (e) { /* déjà en cours */ }
+    phase = 'listening'; finalBuf = ''; clearTimers(); hidePending();
+    try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+    try { recog.start(); } catch (e) { /* déjà lancé */ }
+    setState('listening', '<span class="live">À l\'écoute…</span>');
+    hint.textContent = "Parle tranquillement, prends ton temps. Je n'envoie qu'après une pause.";
   }
+
+  // Silence prolongé → on fige la phrase et on ouvre la fenêtre d'annulation
+  function armSilence() {
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      if (finalBuf.trim()) enterConfirm(finalBuf.trim());
+    }, SILENCE_MS);
+  }
+
+  function enterConfirm(txt) {
+    phase = 'confirm';
+    try { recog.stop(); } catch (e) {}
+    setState('idle', 'À vérifier');
+    pendingText.textContent = txt;
+    pending.classList.add('show');
+    hint.textContent = "J'envoie dans un instant — tu peux annuler et recommencer.";
+    pendingFill.classList.remove('run'); void pendingFill.offsetWidth; pendingFill.classList.add('run');
+    clearTimeout(confirmTimer);
+    confirmTimer = setTimeout(confirmSend, CONFIRM_MS);
+  }
+
+  function confirmSend() {
+    const txt = pendingText.textContent.trim();
+    clearTimers(); hidePending(); phase = 'sending';
+    if (txt) ask(txt); else resumeIfConversing();
+  }
+
+  function cancelPending() {
+    clearTimers(); hidePending();
+    if (conversing) startListening();
+    else { phase = 'idle'; setState('idle', 'Prêt'); hint.textContent = "Appuie pour reprendre."; }
+  }
+
   if (SR) {
     recog = new SR();
-    recog.lang = 'fr-FR'; recog.interimResults = false; recog.maxAlternatives = 1;
+    recog.lang = 'fr-FR'; recog.continuous = true; recog.interimResults = true; recog.maxAlternatives = 1;
     recog.onresult = (ev) => {
-      const txt = ev.results[0][0].transcript.trim();
-      if (txt) ask(txt); else resumeIfConversing();
+      if (phase !== 'listening') return;
+      let interim = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const res = ev.results[i];
+        if (res.isFinal) finalBuf += res[0].transcript + ' ';
+        else interim += res[0].transcript;
+      }
+      pending.classList.add('show');
+      pendingText.textContent = (finalBuf + interim).trim();
+      armSilence();
     };
     recog.onerror = (ev) => {
-      if (ev.error !== 'no-speech' && ev.error !== 'aborted')
-        errEl.textContent = "Micro : " + ev.error;
+      if (ev.error !== 'no-speech' && ev.error !== 'aborted') errEl.textContent = "Micro : " + ev.error;
     };
-    // fin d'un cycle d'écoute (silence) → on relance tant que la conversation est ouverte
-    recog.onend = () => { if (conversing && body.dataset.state === 'listening') setTimeout(startListening, 250); };
+    // Le navigateur arrête parfois l'écoute tout seul → on relance tant qu'on écoute
+    recog.onend = () => { if (conversing && phase === 'listening') { try { recog.start(); } catch (e) {} } };
   } else {
     hint.textContent = "Reconnaissance vocale non dispo sur ce navigateur — utilise la saisie texte ci-dessous.";
   }
 
+  cancelBtn.addEventListener('click', cancelPending);
+  sendNowBtn.addEventListener('click', confirmSend);
+
   function startConversation() {
-    conversing = true; orb.textContent = 'Arrêter';
-    hint.textContent = "Parle quand tu veux — je t'écoute en continu.";
+    conversing = true; orb.textContent = 'Arrêter'; errEl.textContent = '';
     startListening();
   }
   function stopConversation() {
-    conversing = false; orb.textContent = 'Démarrer';
+    conversing = false; phase = 'idle'; orb.textContent = 'Démarrer';
+    clearTimers(); hidePending();
+    speakToken++;   // invalide toute lecture vocale en cours (y compris entre deux phrases)
     if (recog) { try { recog.abort(); } catch (e) {} }
     if ('speechSynthesis' in window) speechSynthesis.cancel();
-    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix edge-tts en cours
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix en cours
     setState('idle', 'Prêt');
     hint.textContent = "Conversation en pause. Appuie pour reprendre.";
   }
@@ -285,14 +459,21 @@
     conversing ? stopConversation() : startConversation();
   });
 
-  // Changer de compte : oublie le code, vide la conversation, en redemande un
-  $('switchAccount').addEventListener('click', () => {
+  // Changer de compte : sauvegarde la mémoire, oublie le code, redemande un nouveau
+  $('switchAccount').addEventListener('click', async () => {
     if (conversing) stopConversation();
+    const oldCode = localStorage.getItem('vindia_code');
+    if (oldCode) {
+      try { await fetch('/session/end', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: oldCode }) }); } catch (e) {}
+    }
     localStorage.removeItem('vindia_code');
+    _displayName = '';
+    sub.textContent = 'Assistant vocal — en français';
     tr.innerHTML = ''; tr.classList.remove('show');
     errEl.textContent = '';
     const c = getCode();
-    hint.textContent = c ? "Compte change. Appuie sur Demarrer." : "Aucun code saisi.";
+    if (c) await resolveIdentity(c);
+    hint.textContent = c ? (_displayName ? 'Bonjour ' + _displayName + ', appuie pour démarrer.' : 'Compte changé. Appuie pour démarrer.') : 'Aucun code saisi.';
   });
 
   // PWA : enregistrement du service worker (installable comme une app)
@@ -302,6 +483,9 @@
     const m = textInput.value.trim();
     if (!m) return;
     textInput.value = '';
+    clearTimers(); hidePending();
+    if (recog) { try { recog.abort(); } catch (e) {} }
+    if (phase === 'listening' || phase === 'confirm') phase = 'sending';
     ask(m);
   }
   sendBtn.addEventListener('click', sendText);

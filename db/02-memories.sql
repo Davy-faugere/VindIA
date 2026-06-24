@@ -13,4 +13,4 @@ CREATE TABLE IF NOT EXISTS member_memories (
     created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_memories_member FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
     INDEX idx_memories_member (member_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

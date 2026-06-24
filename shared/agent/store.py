@@ -132,6 +132,31 @@ class Store:
         self._conn.commit()
         return mid
 
+    def trim_memories(self, member_id: str, max_count: int) -> int:
+        """Supprime les faits les plus anciens si le total dépasse max_count.
+
+        Retourne le nombre de faits supprimés (0 si déjà sous la limite).
+        Compatible SQLite et MariaDB.
+        """
+        cur = self._exec(
+            "SELECT COUNT(*) FROM member_memories WHERE member_id = ?", (member_id,)
+        )
+        count = int(cur.fetchone()[0])
+        to_delete = count - max_count
+        if to_delete <= 0:
+            return 0
+        cur = self._exec(
+            "SELECT id FROM member_memories WHERE member_id = ? ORDER BY created_at ASC LIMIT ?",
+            (member_id, to_delete),
+        )
+        ids = [row[0] for row in cur.fetchall()]
+        if not ids:
+            return 0
+        ph = ",".join(["?"] * len(ids))
+        self._exec(f"DELETE FROM member_memories WHERE id IN ({ph})", tuple(ids))
+        self._conn.commit()
+        return len(ids)
+
 
 def make_member_resolver(store: Store, session_id: str):
     """Adapte le store en résolveur (tenant_id, speaker_id) -> member_id pour la session."""

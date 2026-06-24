@@ -84,6 +84,38 @@ class StoreTest(unittest.TestCase):
     def test_get_memories_empty_for_unknown_member(self):
         self.assertEqual(fresh_store().get_memories("inconnu"), [])
 
+    def test_trim_memories_deletes_oldest_when_over_limit(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid, "Davy")
+        for i in range(5):
+            s.save_memory(mid, tid, None, f"fait {i}")
+        deleted = s.trim_memories(mid, 3)
+        self.assertEqual(deleted, 2)
+        remaining = s.get_memories(mid)
+        self.assertEqual(len(remaining), 3)
+        # Les 2 plus anciens (fait 0, fait 1) doivent avoir été supprimés.
+        self.assertNotIn("fait 0", remaining)
+        self.assertNotIn("fait 1", remaining)
+        self.assertIn("fait 4", remaining)
+
+    def test_trim_memories_noop_under_limit(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid)
+        s.save_memory(mid, tid, None, "seul fait")
+        self.assertEqual(s.trim_memories(mid, 5), 0)
+        self.assertEqual(len(s.get_memories(mid)), 1)
+
+    def test_trim_memories_exact_limit_is_noop(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid)
+        for i in range(3):
+            s.save_memory(mid, tid, None, f"fait {i}")
+        self.assertEqual(s.trim_memories(mid, 3), 0)
+        self.assertEqual(len(s.get_memories(mid)), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

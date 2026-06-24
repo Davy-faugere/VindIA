@@ -79,4 +79,6 @@ class MemoryStore:
             if isinstance(fact, str) and fact.strip():
                 self._db.save_memory(member_id, tenant_id, session_id, fact.strip())
                 saved += 1
+        if saved:
+            self._db.trim_memories(member_id, 30)
         return saved

@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
 import sys
+import time
+from collections import defaultdict
 from pathlib import Path
 
 # shared.agent est au niveau parent (vindia-work/) ; on s'assure qu'il est importable.
@@ -59,6 +62,22 @@ _CODE_MAP: dict[str, dict] = {
 _store = None
 _memory = None
 _llm = None
+
+# Rate limiting : compteur glissant par code d'accès (60 req / heure)
+_RATE_LIMIT = 60
+_RATE_WINDOW = 3600.0
+_rate_buckets: dict = defaultdict(list)
+
+
+def _check_rate(code: str) -> bool:
+    now = time.monotonic()
+    bucket = [t for t in _rate_buckets[code] if now - t < _RATE_WINDOW]
+    if len(bucket) >= _RATE_LIMIT:
+        _rate_buckets[code] = bucket
+        return False
+    bucket.append(now)
+    _rate_buckets[code] = bucket
+    return True
 
 
 def _init_services() -> None:
@@ -182,9 +201,14 @@ async def build(request: web.Request) -> web.Response:
 async def auth(request: web.Request) -> web.Response:
     """Identifie l'utilisateur, charge sa mémoire dans le LLM.
 
-    GET /auth?code=CODE → {ok, display_name, has_memory}
+    POST /auth  body: {code}  → {ok, display_name, has_memory}
+    (POST pour éviter que le code d'accès apparaisse en clair dans les logs nginx)
     """
-    code = (request.query.get("code") or "").strip()
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    code = (data.get("code") or "").strip()
     if code not in _CODE_MAP:
         return web.json_response({"ok": False, "error": "code invalide"}, status=401)
     _init_services()
@@ -202,6 +226,25 @@ async def auth(request: web.Request) -> web.Response:
     })
 
 
+async def health(request: web.Request) -> web.Response:
+    """Sonde de disponibilité : teste la connexion MariaDB.
+
+    GET /health → 200 {server, db, llm} ou 503 si la DB est en erreur.
+    """
+    status: dict = {"server": "ok", "db": "not_init", "llm": "not_init"}
+    http_status = 200
+    if _llm is not None:
+        status["llm"] = "ok"
+    if _store is not None:
+        try:
+            _store._exec("SELECT 1")
+            status["db"] = "ok"
+        except Exception:
+            status["db"] = "error"
+            http_status = 503
+    return web.json_response(status, status=http_status)
+
+
 async def ask(request: web.Request) -> web.Response:
     """Appel Mistral direct avec mémoire long-terme (remplace le webhook n8n).
 
@@ -217,11 +260,15 @@ async def ask(request: web.Request) -> web.Response:
         return web.json_response({"error": "message vide"}, status=400)
     if code not in _CODE_MAP:
         return web.json_response({"error": "code invalide"}, status=401)
+    if not _check_rate(code):
+        return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
     _init_services()
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
     try:
-        reply = await _llm.reply(message, session_id=code)
+        reply = await asyncio.wait_for(_llm.reply(message, session_id=code), timeout=30.0)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "délai dépassé, réessaie"}, status=504)
     except Exception as exc:
         return web.json_response({"error": str(exc)[:300]}, status=502)
     return web.json_response({"reply": reply})
@@ -257,7 +304,8 @@ def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/token", token)
-    app.router.add_get("/auth", auth)
+    app.router.add_get("/health", health)
+    app.router.add_post("/auth", auth)
     app.router.add_post("/ask", ask)
     app.router.add_post("/session/end", session_end)
     app.router.add_post("/tts", tts)

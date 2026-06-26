@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from shared.agent.runtime import ConversationRuntime, _clean_for_tts
+from shared.agent.runtime import ConversationRuntime
 from shared.agent.session import SessionDescriptor
 
 
@@ -175,32 +175,10 @@ class MemoryIntegrationTest(unittest.TestCase):
         self.assertEqual(extracted[0]["mid"], "m1")
 
 
-class CleanForTTSTest(unittest.TestCase):
-    def test_strips_bold(self):
-        self.assertEqual(_clean_for_tts("Voici **important** ici."), "Voici important ici.")
-
-    def test_strips_italic(self):
-        self.assertEqual(_clean_for_tts("mot *accentué* là."), "mot accentué là.")
-
-    def test_strips_heading(self):
-        self.assertEqual(_clean_for_tts("## Titre principal"), "Titre principal")
-
-    def test_strips_list_dash(self):
-        self.assertEqual(_clean_for_tts("- item un\n- item deux"), "item un\nitem deux")
-
-    def test_strips_numbered_list(self):
-        self.assertEqual(_clean_for_tts("1. premier\n2. deuxième"), "premier\ndeuxième")
-
-    def test_strips_inline_code(self):
-        self.assertEqual(_clean_for_tts("utilise `print()` ici"), "utilise print() ici")
-
-    def test_strips_link(self):
-        self.assertEqual(_clean_for_tts("voir [le site](https://example.com)"), "voir le site")
-
-    def test_plain_text_unchanged(self):
-        text = "Bonjour, comment puis-je vous aider ?"
-        self.assertEqual(_clean_for_tts(text), text)
-
+class TTSNormalizationIntegrationTest(unittest.TestCase):
+    # La couverture unitaire de la normalisation vit dans test_speech_normalize.py
+    # (sur-ensemble : markdown + URLs + symboles + emails). Ici on garde le test
+    # d'intégration : le texte normalisé atteint bien le TTS via le runtime.
     def test_tts_text_reaches_synth(self):
         """Le texte nettoyé (pas le brut LLM) arrive au TTS."""
         synthesized = []

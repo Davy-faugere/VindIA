@@ -166,7 +166,7 @@ class AdaptersIntoRuntimeTest(unittest.TestCase):
 
     def test_full_pipeline_with_real_adapters(self):
         async def fake_stt(audio, locale):
-            return f"dit[{locale}]"
+            return f"dit en {locale}"
 
         async def fake_llm(messages):
             return "réponse(" + messages[-1]["content"] + ")"
@@ -198,7 +198,7 @@ class AdaptersIntoRuntimeTest(unittest.TestCase):
         asyncio.run(scenario())
 
         self.assertEqual(len(played), 1)
-        expected = b"SPEECH:" + "réponse(dit[fr-FR])".encode()
+        expected = b"SPEECH:" + "réponse(dit en fr-FR)".encode()
         self.assertEqual(played[0], expected)
         self.assertIn(("s1", "transcript"), events)
         self.assertIn(("s1", "reply"), events)

@@ -102,7 +102,7 @@ class MistralLLM:
         self._project_context: Dict[str, str] = {}
         self._client = None  # mémoïsé au 1er appel live
 
-    async def reply(self, text: str, *, session_id: str) -> str:
+    async def reply(self, text: str, *, session_id: str, extra_tools: Optional[object] = None) -> str:
         history = self._history.get(session_id, deque(maxlen=self._max_history * 2))
         messages: list[dict] = []
         # System = prompt de base + mémoire long-terme + projet actif (si présents).
@@ -120,8 +120,15 @@ class MistralLLM:
         messages.extend(history)
         messages.append({"role": "user", "content": text})
 
-        if self._tools:
-            response = await self._reply_with_tools(messages)
+        # Outils actifs pour CET énoncé : globaux (web) + éventuels outils de
+        # session (projet de l'utilisateur), combinés sans muter le registre global.
+        if extra_tools is not None and self._tools is not None:
+            active_tools = self._tools.merged_with(extra_tools)
+        else:
+            active_tools = extra_tools if extra_tools is not None else self._tools
+
+        if active_tools:
+            response = await self._reply_with_tools(messages, active_tools)
         else:
             transport = self._transport or self._live_transport()
             response = await transport(messages)
@@ -134,16 +141,17 @@ class MistralLLM:
         self._history[session_id] = history
         return response
 
-    async def _reply_with_tools(self, base: Sequence[dict]) -> str:
+    async def _reply_with_tools(self, base: Sequence[dict], tools: object) -> str:
         """Boucle function-calling : LLM ↔ outils jusqu'à une réponse en clair.
 
-        Contrat du `tool_transport` — `(messages, specs) -> dict` avec :
+        `tools` = le registre actif pour cet énoncé (globaux + session). Contrat du
+        `tool_transport` — `(messages, specs) -> dict` avec :
           - "content"    : texte de réponse (présent quand pas de tool_calls) ;
           - "tool_calls" : liste normalisée [{id, name, arguments}] à exécuter ;
           - "assistant"  : message assistant à réinjecter tel quel au tour suivant.
         """
         transport = self._tool_transport or self._live_tool_transport()
-        specs = self._tools.specs()
+        specs = tools.specs()
         work = list(base)
         for _ in range(self._max_tool_hops):
             out = await transport(work, specs)
@@ -152,7 +160,7 @@ class MistralLLM:
                 return out.get("content") or ""
             work.append(out["assistant"])  # assistant + ses tool_calls
             for call in calls:
-                result = await self._tools.dispatch(call["name"], call.get("arguments"))
+                result = await tools.dispatch(call["name"], call.get("arguments"))
                 work.append(
                     {
                         "role": "tool",

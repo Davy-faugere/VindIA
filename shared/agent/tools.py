@@ -217,6 +217,18 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.spec.name] = tool
 
+    def merged_with(self, other: Optional["ToolRegistry"]) -> "ToolRegistry":
+        """Nouveau registre = ces outils + ceux de `other` (par-requête, sans muter).
+
+        Sert à combiner les outils globaux (web) avec des outils éphémères scopés à
+        la session (projet de l'utilisateur), le temps d'un seul énoncé.
+        """
+        combined = ToolRegistry()
+        combined._tools = dict(self._tools)
+        if other:
+            combined._tools.update(other._tools)
+        return combined
+
     def __len__(self) -> int:
         return len(self._tools)
 

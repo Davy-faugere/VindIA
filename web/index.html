@@ -146,8 +146,8 @@
         <option value="">Sans projet</option>
       </select>
       <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
-      <button id="attachBtn" type="button" title="Joindre un ou plusieurs fichiers">Fichiers</button>
-      <button id="folderBtn" type="button" title="Joindre un dossier entier">Dossier</button>
+      <button id="attachBtn" type="button" title="Ajouter des fichiers de référence">Importer</button>
+      <button id="folderBtn" type="button" title="Ajouter un dossier de référence">Dossier</button>
       <input id="fileInput" type="file" hidden multiple
              accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
       <input id="folderInput" type="file" hidden webkitdirectory />
@@ -159,12 +159,25 @@
     </div>
 
     <div class="actions">
+      <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button">Connexions</button>
       <button id="switchAccount" class="switch">Changer de compte</button>
     </div>
     <footer>VindIA — voix française naturelle</footer>
   </main>
+
+  <div class="overlay" id="filesOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Fichiers du projet</span>
+        <button id="filesClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">VindIA lit ces fichiers à la demande et peut en créer ici. Clique pour télécharger.</p>
+      <div id="filesList" class="conn-list"></div>
+      <p class="sheet-note" id="filesNote"></p>
+    </div>
+  </div>
 
   <div class="overlay" id="connOverlay" hidden>
     <div class="sheet">
@@ -492,6 +505,43 @@
   $('memoryBtn').addEventListener('click', () => { memOverlay.hidden = false; renderMemory(); });
   $('memClose').addEventListener('click', () => { memOverlay.hidden = true; });
   memOverlay.addEventListener('click', (e) => { if (e.target === memOverlay) memOverlay.hidden = true; });
+
+  // ── Fichiers du projet actif : voir + télécharger (y compris ce que VindIA crée) ──
+  const filesOverlay = $('filesOverlay'), filesList = $('filesList'), filesNote = $('filesNote');
+
+  async function renderProjectFiles() {
+    filesNote.textContent = ''; filesList.innerHTML = '';
+    const pid = projSelect.value;
+    if (!pid) { filesNote.textContent = "Choisis d'abord un projet."; return; }
+    try {
+      const d = await projApi('/projects/list');
+      const proj = (d.projects || []).find(p => p.project_id === pid);
+      const docs = (proj && proj.documents) || [];
+      if (!docs.length) { filesNote.textContent = "Ce projet n'a encore aucun fichier."; return; }
+      docs.forEach(doc => {
+        const row = document.createElement('div'); row.className = 'conn-row';
+        const left = document.createElement('div'); left.className = 'conn-name'; left.textContent = doc.filename;
+        const btn = document.createElement('button'); btn.className = 'conn-btn'; btn.textContent = 'Télécharger';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            const r = await projApi('/projects/file', { project_id: pid, filename: doc.filename });
+            const blob = new Blob([r.content || ''], { type: 'text/plain;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = doc.filename; a.click();
+            URL.revokeObjectURL(a.href);
+          } catch (e) { filesNote.textContent = e.message; }
+          finally { btn.disabled = false; }
+        };
+        row.appendChild(left); row.appendChild(btn);
+        filesList.appendChild(row);
+      });
+    } catch (e) { filesNote.textContent = e.message; }
+  }
+
+  $('filesBtn').addEventListener('click', () => { filesOverlay.hidden = false; renderProjectFiles(); });
+  $('filesClose').addEventListener('click', () => { filesOverlay.hidden = true; });
+  filesOverlay.addEventListener('click', (e) => { if (e.target === filesOverlay) filesOverlay.hidden = true; });
 
   // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;

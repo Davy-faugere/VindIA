@@ -280,6 +280,25 @@ class ProjectStore:
             chunks.append(f"\n--- {d.filename} ---\n{body}")
         return "\n".join(chunks)
 
+    def build_index(self, member_id: str, project_id: str) -> str:
+        """Index LÉGER du projet (noms des fichiers seulement) pour le system prompt.
+
+        Contrairement à build_context, n'injecte PAS le contenu : VindIA voit ce qui
+        est disponible et lit À LA DEMANDE via ses outils (espace de travail à la
+        Claude). Garde le contexte court même pour un gros dossier.
+        """
+        proj = self.get_project(member_id, project_id)
+        if proj is None:
+            return ""
+        head = f"[Projet de référence actif : « {proj.name} »]"
+        if not proj.documents:
+            return head + "\nLe projet est vide. Tu peux y créer des fichiers (write_project_file)."
+        files = "\n".join(f"- {d.filename}" for d in proj.documents)
+        return (
+            f"{head}\nFichiers disponibles (lis-les à la demande avec read_project_file, "
+            f"n'invente jamais leur contenu) :\n{files}"
+        )
+
     # -- persistance meta ---------------------------------------------------- #
     def _write_meta(self, member_id: str, proj: Project) -> None:
         meta = self._project_dir(member_id, proj.project_id) / "meta.json"

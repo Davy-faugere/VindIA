@@ -32,6 +32,8 @@ from filegen import build_file, OFFICE_TYPES
 from shared.agent.projects import ProjectStore, extract_text, ExtractionError
 from shared.agent.vault import CredentialVault, fernet_crypto
 from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
+from shared.agent.project_tools import build_project_tools
+from shared.agent.tools import ToolRegistry
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -82,6 +84,9 @@ _PUBLIC_URL = os.environ.get("VINDIA_PUBLIC_URL", "").rstrip("/")
 # States OAuth en cours : state -> (member_id, timestamp monotonic). Anti-CSRF, TTL court.
 _oauth_states: dict = {}
 _OAUTH_STATE_TTL = 600.0
+# Projet de référence actif par session (code → project_id). Détermine les outils
+# fichiers (lister/lire/écrire) que VindIA reçoit pour cet utilisateur.
+_active_project: dict = {}
 
 # Rate limiting : compteur glissant par code d'accès (60 req / heure)
 _RATE_LIMIT = 60
@@ -309,11 +314,18 @@ async def ask(request: web.Request) -> web.Response:
     _init_services()
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
-    # Avec accès web, un énoncé peut enchaîner recherche + fetch + synthèse :
+    # Outils du projet actif (lire/écrire à la demande), scopés à CE membre + projet.
+    extra_tools = None
+    active_pid = _active_project.get(code)
+    if active_pid and _projects is not None:
+        extra_tools = ToolRegistry(build_project_tools(_projects, _member_of(code), active_pid))
+    # Avec outils (web et/ou projet), un énoncé peut enchaîner plusieurs appels :
     # on laisse plus de marge qu'une réponse LLM directe.
-    timeout = 60.0 if getattr(_llm, "_tools", None) else 30.0
+    timeout = 60.0 if (getattr(_llm, "_tools", None) or extra_tools) else 30.0
     try:
-        reply = await asyncio.wait_for(_llm.reply(message, session_id=code), timeout=timeout)
+        reply = await asyncio.wait_for(
+            _llm.reply(message, session_id=code, extra_tools=extra_tools), timeout=timeout
+        )
     except asyncio.TimeoutError:
         return web.json_response({"error": "délai dépassé, réessaie"}, status=504)
     except Exception as exc:
@@ -389,6 +401,28 @@ async def projects_create(request: web.Request) -> web.Response:
     return web.json_response({"project": proj.as_dict()})
 
 
+async def project_file(request: web.Request) -> web.Response:
+    """POST /projects/file {code, project_id, filename} → contenu d'un fichier (pour télécharger).
+
+    Permet à l'utilisateur de récupérer un fichier que VindIA a créé dans le projet.
+    Isolé : member_id dérivé du code, lecture confinée à l'espace du membre.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    member_id = _member_of((data.get("code") or "").strip())
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    project_id = (data.get("project_id") or "").strip()
+    filename = (data.get("filename") or "").strip()
+    content = _projects.read_document(member_id, project_id, filename) if _projects else ""
+    if not content:
+        return web.json_response({"error": "fichier introuvable"}, status=404)
+    return web.json_response({"filename": filename, "content": content})
+
+
 async def projects_activate(request: web.Request) -> web.Response:
     """POST /projects/activate {code, project_id} → charge les docs du projet dans le LLM.
 
@@ -410,8 +444,12 @@ async def projects_activate(request: web.Request) -> web.Response:
         proj = _projects.get_project(member_id, project_id)
         if proj is None:
             return web.json_response({"error": "projet inconnu"}, status=404)
-        ctx = _projects.build_context(member_id, project_id)
+        # Index LÉGER (noms seulement) : VindIA lira les fichiers à la demande.
+        ctx = _projects.build_index(member_id, project_id)
         name = proj.name
+        _active_project[code] = project_id
+    else:
+        _active_project.pop(code, None)
     if _llm is not None and hasattr(_llm, "load_project"):
         _llm.load_project(code, ctx)
     return web.json_response({"ok": True, "active": name})
@@ -481,9 +519,9 @@ async def upload(request: web.Request) -> web.Response:
         doc = _projects.add_document(member_id, project_id, filename, text)
         added.append({"filename": doc.filename, "chars": doc.chars})
 
-    # Une seule actualisation du contexte LLM si le projet est actif pour la session.
-    if added and _llm is not None and hasattr(_llm, "load_project"):
-        _llm.load_project(code, _projects.build_context(member_id, project_id))
+    # Rafraîchit l'index léger (noms) si ce projet est actif pour la session.
+    if added and _active_project.get(code) == project_id and _llm is not None and hasattr(_llm, "load_project"):
+        _llm.load_project(code, _projects.build_index(member_id, project_id))
     return web.json_response({"ok": True, "added": added, "skipped": skipped})
 
 
@@ -655,6 +693,7 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/list", projects_list)
     app.router.add_post("/projects/create", projects_create)
     app.router.add_post("/projects/activate", projects_activate)
+    app.router.add_post("/projects/file", project_file)
     app.router.add_post("/upload", upload)
     app.router.add_post("/connections/list", connections_list)
     app.router.add_post("/connections/disconnect", connections_disconnect)

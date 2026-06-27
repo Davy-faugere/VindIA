@@ -72,8 +72,11 @@ _google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
-# Taille max d'un fichier uploadé (anti-DoS) : 10 Mo.
+# Taille max d'un fichier uploadé (anti-DoS) : 10 Mo par fichier.
 _MAX_UPLOAD = 10 * 1024 * 1024
+# Upload multiple (dossier local) : bornes cumulées sur une requête.
+_MAX_BATCH = 60 * 1024 * 1024   # 60 Mo cumulés par requête
+_MAX_FILES = 50                 # nb max de fichiers par requête
 # URL publique (pour le redirect OAuth). Ex : https://vindia.faugere-davy.fr
 _PUBLIC_URL = os.environ.get("VINDIA_PUBLIC_URL", "").rstrip("/")
 # States OAuth en cours : state -> (member_id, timestamp monotonic). Anti-CSRF, TTL court.
@@ -415,56 +418,73 @@ async def projects_activate(request: web.Request) -> web.Response:
 
 
 async def upload(request: web.Request) -> web.Response:
-    """POST /upload (multipart: code, project_id, file) → ingère le fichier dans le projet.
+    """POST /upload (multipart: code, project_id, file[, file…]) → ingère 1..N fichiers.
 
-    Le texte extrait est rangé dans l'espace privé du membre puis (si la session
-    a ce projet actif) reflété dans le contexte du LLM.
+    Accepte plusieurs parts « file » (sélection multiple ou dossier local) en UNE
+    requête : les formats non gérés ou vides sont ignorés (listés dans `skipped`),
+    les autres rangés dans l'espace privé du membre. Une seule actualisation du
+    contexte LLM à la fin. Rétrocompatible avec l'envoi d'un fichier unique.
     """
-    if request.content_length and request.content_length > _MAX_UPLOAD:
-        return web.json_response({"error": "fichier trop volumineux (max 10 Mo)"}, status=413)
     try:
         reader = await request.multipart()
     except Exception:
         return web.json_response({"error": "multipart attendu"}, status=400)
 
-    code = project_id = filename = None
-    payload = b""
+    code = project_id = None
+    files: list = []          # (filename, payload)
+    total = 0
     async for part in reader:
         if part.name == "code":
             code = (await part.text()).strip()
         elif part.name == "project_id":
             project_id = (await part.text()).strip()
         elif part.name == "file":
-            filename = part.filename or "fichier"
             payload = await part.read(decode=False)
             if len(payload) > _MAX_UPLOAD:
-                return web.json_response({"error": "fichier trop volumineux (max 10 Mo)"}, status=413)
+                return web.json_response({"error": f"« {part.filename} » dépasse 10 Mo"}, status=413)
+            total += len(payload)
+            if total > _MAX_BATCH:
+                return web.json_response({"error": "envoi trop volumineux (max 60 Mo au total)"}, status=413)
+            files.append((part.filename or "fichier", payload))
+            if len(files) > _MAX_FILES:
+                return web.json_response({"error": f"trop de fichiers (max {_MAX_FILES})"}, status=413)
 
     member_id = _member_of(code or "")
     if member_id is None:
         return web.json_response({"error": "code invalide"}, status=401)
     if not project_id:
         return web.json_response({"error": "project_id manquant"}, status=400)
-    if not payload:
-        return web.json_response({"error": "fichier vide"}, status=400)
+    if not files:
+        return web.json_response({"error": "aucun fichier"}, status=400)
     if not _check_rate(code):
         return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
     _init_services()
     if _projects.get_project(member_id, project_id) is None:
         return web.json_response({"error": "projet inconnu"}, status=404)
-    try:
-        text = extract_text(filename, payload)
-    except ExtractionError as exc:
-        return web.json_response({"error": str(exc)}, status=415)
-    except Exception as exc:
-        return web.json_response({"error": f"extraction impossible : {str(exc)[:200]}"}, status=502)
-    if not text.strip():
-        return web.json_response({"error": "aucun texte exploitable dans le fichier"}, status=422)
-    doc = _projects.add_document(member_id, project_id, filename, text)
-    # Si ce projet est actif pour la session, rafraîchir le contexte du LLM.
-    if _llm is not None and hasattr(_llm, "load_project"):
+
+    added, skipped = [], []
+    for filename, payload in files:
+        if not payload:
+            skipped.append({"filename": filename, "reason": "vide"})
+            continue
+        try:
+            text = extract_text(filename, payload)
+        except ExtractionError as exc:
+            skipped.append({"filename": filename, "reason": str(exc)})
+            continue
+        except Exception as exc:
+            skipped.append({"filename": filename, "reason": f"extraction: {str(exc)[:120]}"})
+            continue
+        if not text.strip():
+            skipped.append({"filename": filename, "reason": "aucun texte exploitable"})
+            continue
+        doc = _projects.add_document(member_id, project_id, filename, text)
+        added.append({"filename": doc.filename, "chars": doc.chars})
+
+    # Une seule actualisation du contexte LLM si le projet est actif pour la session.
+    if added and _llm is not None and hasattr(_llm, "load_project"):
         _llm.load_project(code, _projects.build_context(member_id, project_id))
-    return web.json_response({"ok": True, "filename": doc.filename, "chars": doc.chars})
+    return web.json_response({"ok": True, "added": added, "skipped": skipped})
 
 
 # ──────────────────────────────────────────────────────────────

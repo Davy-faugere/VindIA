@@ -146,9 +146,11 @@
         <option value="">Sans projet</option>
       </select>
       <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
-      <button id="attachBtn" type="button" title="Joindre un fichier au projet">Joindre</button>
-      <input id="fileInput" type="file" hidden
-             accept=".txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
+      <button id="attachBtn" type="button" title="Joindre un ou plusieurs fichiers">Fichiers</button>
+      <button id="folderBtn" type="button" title="Joindre un dossier entier">Dossier</button>
+      <input id="fileInput" type="file" hidden multiple
+             accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
+      <input id="folderInput" type="file" hidden webkitdirectory />
     </div>
 
     <div class="typebar">
@@ -324,33 +326,59 @@
     } catch (e) { errEl.textContent = e.message; }
   });
 
-  attachBtn.addEventListener('click', () => {
-    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
-    errEl.textContent = '';
-    fileInput.click();
-  });
+  const folderBtn = $('folderBtn'), folderInput = $('folderInput');
+  // Extensions ingérables (mêmes que le serveur) : on filtre côté client pour
+  // ne pas envoyer le contenu inutile d'un dossier (images, binaires…).
+  const OK_EXT = ['txt','md','markdown','csv','tsv','log','json','yaml','yml','html','htm','docx','xlsx','pptx','pdf'];
+  const extOf = (n) => (n.split('.').pop() || '').toLowerCase();
 
-  fileInput.addEventListener('change', async () => {
-    const f = fileInput.files[0];
-    if (!f) return;
+  async function uploadFiles(fileList) {
+    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
+    const all = Array.from(fileList || []);
+    const kept = all.filter(f => OK_EXT.includes(extOf(f.name)) && f.size > 0);
+    if (!kept.length) { errEl.textContent = 'Aucun fichier exploitable sélectionné.'; return; }
+    errEl.textContent = '';
     const code = localStorage.getItem('vindia_code') || '';
     const fd = new FormData();
     fd.append('code', code);
     fd.append('project_id', projSelect.value);
-    fd.append('file', f);
-    attachBtn.textContent = '…'; attachBtn.disabled = true;
+    kept.forEach(f => fd.append('file', f, f.name));
+    attachBtn.disabled = true; folderBtn.disabled = true;
+    const prev = attachBtn.textContent; attachBtn.textContent = '… ' + kept.length;
     try {
       const r = await fetch('/upload', { method: 'POST', body: fd });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || ('upload ' + r.status));
-      addLine('ai', 'Document « ' + d.filename + ' » ajouté au projet (' + d.chars + ' caractères lus). Tu peux m\'interroger dessus.');
+      const n = (d.added || []).length, sk = (d.skipped || []).length;
+      let msg = n + (n > 1 ? ' documents ajoutés' : ' document ajouté') + ' au projet';
+      if (sk) msg += ' (' + sk + ' ignoré' + (sk > 1 ? 's' : '') + ')';
+      addLine('ai', msg + '. Tu peux m\'interroger dessus.');
       await loadProjects(projSelect.value);
     } catch (e) {
       errEl.textContent = 'Échec de l\'ajout : ' + e.message;
     } finally {
-      attachBtn.textContent = 'Joindre'; attachBtn.disabled = false;
-      fileInput.value = '';
+      attachBtn.textContent = prev; attachBtn.disabled = false; folderBtn.disabled = false;
+      fileInput.value = ''; folderInput.value = '';
     }
+  }
+
+  attachBtn.addEventListener('click', () => {
+    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
+    errEl.textContent = ''; fileInput.click();
+  });
+  folderBtn.addEventListener('click', () => {
+    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
+    errEl.textContent = ''; folderInput.click();
+  });
+  fileInput.addEventListener('change', () => uploadFiles(fileInput.files));
+  folderInput.addEventListener('change', () => uploadFiles(folderInput.files));
+
+  // Glisser-déposer (PC) : déposer des fichiers sur la carte les joint au projet actif.
+  const card = document.querySelector('.card');
+  ['dragover', 'drop'].forEach(ev => card.addEventListener(ev, (e) => e.preventDefault()));
+  card.addEventListener('drop', (e) => {
+    const dt = e.dataTransfer;
+    if (dt && dt.files && dt.files.length) uploadFiles(dt.files);
   });
 
   loadProjects();

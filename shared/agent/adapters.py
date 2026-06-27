@@ -98,13 +98,23 @@ class MistralLLM:
         self._history: Dict[str, Deque[dict]] = {}
         # Contexte mémorisé long-terme injecté par MemoryStore à l'ouverture de session.
         self._memory_context: Dict[str, str] = {}
+        # Contexte du PROJET actif (documents de l'utilisateur), injecté par ProjectStore.
+        self._project_context: Dict[str, str] = {}
         self._client = None  # mémoïsé au 1er appel live
 
     async def reply(self, text: str, *, session_id: str) -> str:
         history = self._history.get(session_id, deque(maxlen=self._max_history * 2))
         messages: list[dict] = []
-        # System = prompt de base + mémoire long-terme (si chargée pour la session).
-        parts = [p for p in (self._system_prompt, self._memory_context.get(session_id)) if p]
+        # System = prompt de base + mémoire long-terme + projet actif (si présents).
+        parts = [
+            p
+            for p in (
+                self._system_prompt,
+                self._memory_context.get(session_id),
+                self._project_context.get(session_id),
+            )
+            if p
+        ]
         if parts:
             messages.append({"role": "system", "content": "\n\n".join(parts)})
         messages.extend(history)
@@ -159,9 +169,21 @@ class MistralLLM:
         """Injecte la mémoire long-terme d'un membre (appelé par le runtime à open())."""
         self._memory_context[session_id] = context
 
+    def load_project(self, session_id: str, context: str) -> None:
+        """Active un projet : injecte ses documents dans le contexte de la session.
+
+        Canal distinct de la mémoire long-terme → activer/changer de projet ne
+        touche pas aux souvenirs du membre. `context` vide désactive le projet.
+        """
+        if context:
+            self._project_context[session_id] = context
+        else:
+            self._project_context.pop(session_id, None)
+
     def unload_memory(self, session_id: str) -> None:
-        """Libère la mémoire et l'historique d'une session fermée."""
+        """Libère la mémoire, le projet actif et l'historique d'une session fermée."""
         self._memory_context.pop(session_id, None)
+        self._project_context.pop(session_id, None)
         self._history.pop(session_id, None)
 
     def get_history(self, session_id: str) -> list:

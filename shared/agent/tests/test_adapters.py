@@ -101,6 +101,28 @@ class MistralLLMTest(unittest.TestCase):
         self.assertIn("Base.", system_content)
         self.assertIn("[Mémoire]", system_content)
 
+    def test_load_project_injected_and_separate_from_memory(self):
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        llm = MistralLLM(transport=fake, system_prompt="Base.")
+        llm.load_memory("s1", "[Mémoire]\n- fait")
+        llm.load_project("s1", "[Projet]\n- doc.txt")
+        asyncio.run(llm.reply("salut", session_id="s1"))
+
+        system_content = captured["messages"][0]["content"]
+        self.assertIn("[Mémoire]", system_content)
+        self.assertIn("[Projet]", system_content)
+        # Désactiver le projet n'efface pas la mémoire.
+        llm.load_project("s1", "")
+        asyncio.run(llm.reply("encore", session_id="s1"))
+        sc2 = captured["messages"][0]["content"]
+        self.assertIn("[Mémoire]", sc2)
+        self.assertNotIn("[Projet]", sc2)
+
     def test_unload_memory_clears_context_and_history(self):
         async def fake(messages):
             return "ok"

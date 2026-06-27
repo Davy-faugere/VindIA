@@ -28,6 +28,7 @@ from livekit import api
 import edge_tts
 
 from filegen import build_file, OFFICE_TYPES
+from shared.agent.projects import ProjectStore, extract_text, ExtractionError
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -62,6 +63,12 @@ _CODE_MAP: dict[str, dict] = {
 _store = None
 _memory = None
 _llm = None
+_projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistance disque)
+
+# Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
+_DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
+# Taille max d'un fichier uploadé (anti-DoS) : 10 Mo.
+_MAX_UPLOAD = 10 * 1024 * 1024
 
 # Rate limiting : compteur glissant par code d'accès (60 req / heure)
 _RATE_LIMIT = 60
@@ -81,9 +88,11 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm
+    global _store, _memory, _llm, _projects
     if _llm is not None:
         return
+    # Projets : magasin disque isolé par membre (indépendant de MariaDB).
+    _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
     from shared.agent.adapters import MistralLLM
     from shared.agent.tools import build_web_tool_registry
     # Accès web optionnel : activé si SEARXNG_URL est défini (souverain, self-host).
@@ -310,6 +319,129 @@ async def session_end(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "saved": saved})
 
 
+# ──────────────────────────────────────────────────────────────
+# Projets & fichiers — espaces PRIVÉS par membre (isolation stricte)
+# Le member_id découle du code d'accès : un utilisateur ne touche QUE ses projets.
+# ──────────────────────────────────────────────────────────────
+
+def _member_of(code: str):
+    """member_id du code d'accès, ou None si code invalide. Clé de l'isolation."""
+    profile = _CODE_MAP.get(code)
+    return profile["member_id"] if profile else None
+
+
+async def projects_list(request: web.Request) -> web.Response:
+    """POST /projects/list {code} → {projects:[{project_id,name,created_at,documents}]}"""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    member_id = _member_of((data.get("code") or "").strip())
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    projs = _projects.list_projects(member_id)
+    return web.json_response({"projects": [p.as_dict() for p in projs]})
+
+
+async def projects_create(request: web.Request) -> web.Response:
+    """POST /projects/create {code, name} → {project}"""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    member_id = _member_of((data.get("code") or "").strip())
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    name = (data.get("name") or "").strip()[:120]
+    if not name:
+        return web.json_response({"error": "nom de projet vide"}, status=400)
+    _init_services()
+    proj = _projects.create_project(member_id, name)
+    return web.json_response({"project": proj.as_dict()})
+
+
+async def projects_activate(request: web.Request) -> web.Response:
+    """POST /projects/activate {code, project_id} → charge les docs du projet dans le LLM.
+
+    project_id vide → désactive le projet courant (revient au contexte sans projet).
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    code = (data.get("code") or "").strip()
+    member_id = _member_of(code)
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    project_id = (data.get("project_id") or "").strip()
+    ctx = ""
+    name = None
+    if project_id:
+        proj = _projects.get_project(member_id, project_id)
+        if proj is None:
+            return web.json_response({"error": "projet inconnu"}, status=404)
+        ctx = _projects.build_context(member_id, project_id)
+        name = proj.name
+    if _llm is not None and hasattr(_llm, "load_project"):
+        _llm.load_project(code, ctx)
+    return web.json_response({"ok": True, "active": name})
+
+
+async def upload(request: web.Request) -> web.Response:
+    """POST /upload (multipart: code, project_id, file) → ingère le fichier dans le projet.
+
+    Le texte extrait est rangé dans l'espace privé du membre puis (si la session
+    a ce projet actif) reflété dans le contexte du LLM.
+    """
+    if request.content_length and request.content_length > _MAX_UPLOAD:
+        return web.json_response({"error": "fichier trop volumineux (max 10 Mo)"}, status=413)
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return web.json_response({"error": "multipart attendu"}, status=400)
+
+    code = project_id = filename = None
+    payload = b""
+    async for part in reader:
+        if part.name == "code":
+            code = (await part.text()).strip()
+        elif part.name == "project_id":
+            project_id = (await part.text()).strip()
+        elif part.name == "file":
+            filename = part.filename or "fichier"
+            payload = await part.read(decode=False)
+            if len(payload) > _MAX_UPLOAD:
+                return web.json_response({"error": "fichier trop volumineux (max 10 Mo)"}, status=413)
+
+    member_id = _member_of(code or "")
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    if not project_id:
+        return web.json_response({"error": "project_id manquant"}, status=400)
+    if not payload:
+        return web.json_response({"error": "fichier vide"}, status=400)
+    if not _check_rate(code):
+        return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
+    _init_services()
+    if _projects.get_project(member_id, project_id) is None:
+        return web.json_response({"error": "projet inconnu"}, status=404)
+    try:
+        text = extract_text(filename, payload)
+    except ExtractionError as exc:
+        return web.json_response({"error": str(exc)}, status=415)
+    except Exception as exc:
+        return web.json_response({"error": f"extraction impossible : {str(exc)[:200]}"}, status=502)
+    if not text.strip():
+        return web.json_response({"error": "aucun texte exploitable dans le fichier"}, status=422)
+    doc = _projects.add_document(member_id, project_id, filename, text)
+    # Si ce projet est actif pour la session, rafraîchir le contexte du LLM.
+    if _llm is not None and hasattr(_llm, "load_project"):
+        _llm.load_project(code, _projects.build_context(member_id, project_id))
+    return web.json_response({"ok": True, "filename": doc.filename, "chars": doc.chars})
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
@@ -320,6 +452,10 @@ def build_app() -> web.Application:
     app.router.add_post("/session/end", session_end)
     app.router.add_post("/tts", tts)
     app.router.add_post("/build", build)
+    app.router.add_post("/projects/list", projects_list)
+    app.router.add_post("/projects/create", projects_create)
+    app.router.add_post("/projects/activate", projects_activate)
+    app.router.add_post("/upload", upload)
     app.router.add_get("/{name}", static_file)
     return app
 

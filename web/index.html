@@ -67,6 +67,11 @@
   .typebar input{flex:1; padding:11px 14px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:14px; outline:none}
   .typebar input:focus{border-color:var(--accent)}
   .typebar button{padding:0 16px; border:none; border-radius:12px; background:var(--primary); color:#fff; font-weight:600; cursor:pointer}
+  .projbar{display:flex; gap:8px; margin-top:14px; align-items:center}
+  .projbar select{flex:1; padding:9px 12px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:13px; background:#fff; outline:none; color:#374151}
+  .projbar select:focus{border-color:var(--accent)}
+  .projbar button{padding:9px 13px; border:1px solid #e5e7eb; border-radius:12px; background:#fff; color:var(--primary); font:inherit; font-size:13px; font-weight:600; cursor:pointer}
+  .projbar button:hover{border-color:var(--accent)}
   .dl{display:inline-block; margin-top:4px; padding:9px 14px; background:var(--primary); color:#fff;
     border-radius:10px; text-decoration:none; font-weight:600; font-size:13.5px}
   .dl:active{background:var(--primary-hover)}
@@ -115,6 +120,16 @@
     </div>
 
     <div class="transcript" id="transcript"></div>
+
+    <div class="projbar" id="projbar">
+      <select id="projSelect" title="Projet actif">
+        <option value="">Sans projet</option>
+      </select>
+      <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
+      <button id="attachBtn" type="button" title="Joindre un fichier au projet">Joindre</button>
+      <input id="fileInput" type="file" hidden
+             accept=".txt,.md,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
+    </div>
 
     <div class="typebar">
       <input id="textInput" type="text" placeholder="…ou écris ton message" />
@@ -228,6 +243,82 @@
     p.innerHTML = '<b>' + (who === 'ai' ? 'VindIA' : 'Toi') + '</b> : ' + text;
     tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
   };
+
+  // ── Projets & fichiers : espace privé, persistant, isolé par utilisateur ──
+  const projSelect = $('projSelect'), newProjBtn = $('newProjBtn'),
+        attachBtn = $('attachBtn'), fileInput = $('fileInput');
+
+  async function projApi(path, payload) {
+    const code = localStorage.getItem('vindia_code') || '';
+    const r = await fetch(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ code }, payload || {}))
+    });
+    if (r.status === 401) { localStorage.removeItem('vindia_code'); throw new Error("code refusé"); }
+    return r.json();
+  }
+
+  async function loadProjects(selectId) {
+    try {
+      const d = await projApi('/projects/list');
+      projSelect.innerHTML = '<option value="">Sans projet</option>';
+      (d.projects || []).forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.project_id;
+        o.textContent = p.name + (p.documents && p.documents.length ? ' (' + p.documents.length + ')' : '');
+        projSelect.appendChild(o);
+      });
+      if (selectId) projSelect.value = selectId;
+    } catch (e) { /* serveur indispo : barre projet inerte, pas bloquant */ }
+  }
+
+  projSelect.addEventListener('change', async () => {
+    try {
+      const d = await projApi('/projects/activate', { project_id: projSelect.value });
+      if (d.active) addLine('ai', 'Projet « ' + d.active + ' » activé. Je m\'appuie sur ses documents.');
+    } catch (e) { errEl.textContent = e.message; }
+  });
+
+  newProjBtn.addEventListener('click', async () => {
+    const name = (prompt('Nom du projet :') || '').trim();
+    if (!name) return;
+    try {
+      const d = await projApi('/projects/create', { name });
+      await loadProjects(d.project && d.project.project_id);
+      projSelect.dispatchEvent(new Event('change'));
+    } catch (e) { errEl.textContent = e.message; }
+  });
+
+  attachBtn.addEventListener('click', () => {
+    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
+    errEl.textContent = '';
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    const code = localStorage.getItem('vindia_code') || '';
+    const fd = new FormData();
+    fd.append('code', code);
+    fd.append('project_id', projSelect.value);
+    fd.append('file', f);
+    attachBtn.textContent = '…'; attachBtn.disabled = true;
+    try {
+      const r = await fetch('/upload', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('upload ' + r.status));
+      addLine('ai', 'Document « ' + d.filename + ' » ajouté au projet (' + d.chars + ' caractères lus). Tu peux m\'interroger dessus.');
+      await loadProjects(projSelect.value);
+    } catch (e) {
+      errEl.textContent = 'Échec de l\'ajout : ' + e.message;
+    } finally {
+      attachBtn.textContent = 'Joindre'; attachBtn.disabled = false;
+      fileInput.value = '';
+    }
+  });
+
+  loadProjects();
 
   // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;

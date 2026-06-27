@@ -28,6 +28,9 @@ from typing import Awaitable, Callable, Deque, Dict, Optional, Sequence
 # --- Frontières réseau injectables (le "joint" testable de chaque adaptateur) ---
 # LLM : liste de messages {role, content} -> texte de réponse.
 LlmTransport = Callable[[Sequence[dict]], Awaitable[str]]
+# LLM tool-aware : (messages, specs d'outils) -> {content, tool_calls, assistant}.
+# Contrat détaillé dans MistralLLM._reply_with_tools.
+LlmToolTransport = Callable[[Sequence[dict], Sequence[dict]], Awaitable[dict]]
 # STT : (audio brut, locale BCP-47) -> transcription.
 SttTransport = Callable[[object, str], Awaitable[str]]
 # TTS : (texte, locale BCP-47) -> audio synthétisé (bytes).
@@ -76,11 +79,21 @@ class MistralLLM:
         model: str = DEFAULT_LLM_MODEL,
         system_prompt: Optional[str] = VINDIA_SYSTEM_PROMPT,
         max_history: int = 5,
+        tools: Optional[object] = None,
+        tool_transport: Optional["LlmToolTransport"] = None,
+        max_tool_hops: int = 4,
     ) -> None:
         self._transport = transport
         self._model = model
         self._system_prompt = system_prompt
         self._max_history = max_history
+        # Outils (ToolRegistry duck-typé : `.specs()` + `.dispatch()`). Optionnel :
+        # absent → comportement texte pur historique inchangé. Présent → boucle
+        # function-calling activée (le LLM peut chercher sur le web, etc.).
+        self._tools = tools
+        self._tool_transport = tool_transport
+        # Garde-fou anti-boucle : nb max d'allers-retours d'outils par énoncé.
+        self._max_tool_hops = max_tool_hops
         # Historique par session : deque bornée à max_history tours (user+assistant).
         self._history: Dict[str, Deque[dict]] = {}
         # Contexte mémorisé long-terme injecté par MemoryStore à l'ouverture de session.
@@ -96,13 +109,51 @@ class MistralLLM:
             messages.append({"role": "system", "content": "\n\n".join(parts)})
         messages.extend(history)
         messages.append({"role": "user", "content": text})
-        transport = self._transport or self._live_transport()
-        response = await transport(messages)
-        # Mise à jour de l'historique après réponse réussie.
+
+        if self._tools:
+            response = await self._reply_with_tools(messages)
+        else:
+            transport = self._transport or self._live_transport()
+            response = await transport(messages)
+
+        # Mise à jour de l'historique après réponse réussie. NB : seuls le tour
+        # user et la réponse finale entrent dans l'historique long-terme — les
+        # allers-retours d'outils restent internes à l'énoncé (pas de pollution).
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": response})
         self._history[session_id] = history
         return response
+
+    async def _reply_with_tools(self, base: Sequence[dict]) -> str:
+        """Boucle function-calling : LLM ↔ outils jusqu'à une réponse en clair.
+
+        Contrat du `tool_transport` — `(messages, specs) -> dict` avec :
+          - "content"    : texte de réponse (présent quand pas de tool_calls) ;
+          - "tool_calls" : liste normalisée [{id, name, arguments}] à exécuter ;
+          - "assistant"  : message assistant à réinjecter tel quel au tour suivant.
+        """
+        transport = self._tool_transport or self._live_tool_transport()
+        specs = self._tools.specs()
+        work = list(base)
+        for _ in range(self._max_tool_hops):
+            out = await transport(work, specs)
+            calls = out.get("tool_calls") or []
+            if not calls:
+                return out.get("content") or ""
+            work.append(out["assistant"])  # assistant + ses tool_calls
+            for call in calls:
+                result = await self._tools.dispatch(call["name"], call.get("arguments"))
+                work.append(
+                    {
+                        "role": "tool",
+                        "name": call["name"],
+                        "tool_call_id": call.get("id", ""),
+                        "content": result,
+                    }
+                )
+        # Hops épuisés : dernier appel SANS outils pour forcer une réponse parlée.
+        final = await transport(work, [])
+        return final.get("content") or "Désolée, je n'ai pas réussi à aboutir."
 
     def load_memory(self, session_id: str, context: str) -> None:
         """Injecte la mémoire long-terme d'un membre (appelé par le runtime à open())."""
@@ -127,6 +178,41 @@ class MistralLLM:
             return resp.choices[0].message.content
 
         self._transport = _call  # n'enferme pas la lazy-init côté CI
+        return _call
+
+    def _live_tool_transport(self) -> "LlmToolTransport":  # pragma: no cover - live
+        """Transport Mistral tool-aware : mappe l'API vers le contrat de la boucle."""
+
+        async def _call(messages: Sequence[dict], specs: Sequence[dict]) -> dict:
+            client = self._lazy_client()
+            kwargs: dict = {"model": self._model, "messages": list(messages)}
+            if specs:
+                kwargs["tools"] = list(specs)
+                kwargs["tool_choice"] = "auto"
+            resp = await client.chat.complete_async(**kwargs)
+            msg = resp.choices[0].message
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,  # str JSON côté API
+                }
+                for tc in (getattr(msg, "tool_calls", None) or [])
+            ]
+            # Message assistant réinjectable tel quel au tour suivant (format API).
+            assistant: dict = {"role": "assistant", "content": msg.content or ""}
+            if tool_calls:
+                assistant["tool_calls"] = [
+                    {
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {"name": c["name"], "arguments": c["arguments"]},
+                    }
+                    for c in tool_calls
+                ]
+            return {"content": msg.content, "tool_calls": tool_calls, "assistant": assistant}
+
+        self._tool_transport = _call
         return _call
 
     def _lazy_client(self):  # pragma: no cover - dépend de l'install live

@@ -204,5 +204,94 @@ class AdaptersIntoRuntimeTest(unittest.TestCase):
         self.assertIn(("s1", "reply"), events)
 
 
+class MistralLLMToolUseTest(unittest.TestCase):
+    """Boucle function-calling : le LLM appelle un outil puis répond en clair."""
+
+    def test_tool_call_then_final_answer(self):
+        from shared.agent.tools import ToolRegistry, WebSearchTool
+
+        searched = {}
+
+        async def fake_search(query, n):
+            searched["query"] = query
+            return [{"title": "Résultat", "url": "https://x", "snippet": "info"}]
+
+        tools = ToolRegistry([WebSearchTool(transport=fake_search)])
+
+        # Transport tool-aware scripté : 1er appel → demande l'outil ; 2e → réponse.
+        calls = {"n": 0}
+
+        async def fake_tool_transport(messages, specs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self.assertTrue(specs)  # les specs sont bien transmises
+                return {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "c1", "name": "web_search", "arguments": '{"query": "actu"}'}
+                    ],
+                    "assistant": {"role": "assistant", "content": ""},
+                }
+            # 2e tour : le message tool est présent dans l'historique de travail.
+            roles = [m["role"] for m in messages]
+            self.assertIn("tool", roles)
+            return {"content": "Voici l'info trouvée.", "tool_calls": []}
+
+        llm = MistralLLM(tools=tools, tool_transport=fake_tool_transport)
+        out = asyncio.run(llm.reply("quoi de neuf ?", session_id="s1"))
+
+        self.assertEqual(out, "Voici l'info trouvée.")
+        self.assertEqual(searched["query"], "actu")
+        self.assertEqual(calls["n"], 2)
+        # L'historique long-terme ne contient QUE le tour user + réponse finale.
+        history = llm.get_history("s1")
+        self.assertEqual(history, [
+            {"role": "user", "content": "quoi de neuf ?"},
+            {"role": "assistant", "content": "Voici l'info trouvée."},
+        ])
+
+    def test_no_tool_call_returns_directly(self):
+        from shared.agent.tools import ToolRegistry, WebSearchTool
+
+        async def fake_search(query, n):  # pragma: no cover - pas appelé ici
+            return []
+
+        async def fake_tool_transport(messages, specs):
+            return {"content": "Réponse directe.", "tool_calls": []}
+
+        llm = MistralLLM(
+            tools=ToolRegistry([WebSearchTool(transport=fake_search)]),
+            tool_transport=fake_tool_transport,
+        )
+        out = asyncio.run(llm.reply("bonjour", session_id="s1"))
+        self.assertEqual(out, "Réponse directe.")
+
+    def test_hop_limit_forces_final_answer(self):
+        from shared.agent.tools import ToolRegistry, WebSearchTool
+
+        async def fake_search(query, n):
+            return [{"title": "t", "url": "https://x", "snippet": "s"}]
+
+        # Transport qui demande TOUJOURS l'outil → on doit s'arrêter au garde-fou.
+        async def loopy(messages, specs):
+            if specs:  # tant qu'on lui propose des outils, il en redemande
+                return {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "c", "name": "web_search", "arguments": '{"query": "x"}'}
+                    ],
+                    "assistant": {"role": "assistant", "content": ""},
+                }
+            return {"content": "Réponse forcée.", "tool_calls": []}
+
+        llm = MistralLLM(
+            tools=ToolRegistry([WebSearchTool(transport=fake_search)]),
+            tool_transport=loopy,
+            max_tool_hops=2,
+        )
+        out = asyncio.run(llm.reply("cherche", session_id="s1"))
+        self.assertEqual(out, "Réponse forcée.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -85,7 +85,13 @@ def _init_services() -> None:
     if _llm is not None:
         return
     from shared.agent.adapters import MistralLLM
-    _llm = MistralLLM()
+    from shared.agent.tools import build_web_tool_registry
+    # Accès web optionnel : activé si SEARXNG_URL est défini (souverain, self-host).
+    # Absent → VindIA répond sans outils (comportement historique).
+    _web_tools = build_web_tool_registry()
+    _llm = MistralLLM(tools=_web_tools)
+    if _web_tools:
+        print(f"[VindIA] Accès web activé ({len(_web_tools)} outils).")
     try:
         from server.db import open_store
         from shared.agent.memory import MemoryStore
@@ -235,6 +241,7 @@ async def health(request: web.Request) -> web.Response:
     http_status = 200
     if _llm is not None:
         status["llm"] = "ok"
+        status["web_tools"] = bool(getattr(_llm, "_tools", None))
     if _store is not None:
         try:
             _store._exec("SELECT 1")
@@ -265,8 +272,11 @@ async def ask(request: web.Request) -> web.Response:
     _init_services()
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
+    # Avec accès web, un énoncé peut enchaîner recherche + fetch + synthèse :
+    # on laisse plus de marge qu'une réponse LLM directe.
+    timeout = 60.0 if getattr(_llm, "_tools", None) else 30.0
     try:
-        reply = await asyncio.wait_for(_llm.reply(message, session_id=code), timeout=30.0)
+        reply = await asyncio.wait_for(_llm.reply(message, session_id=code), timeout=timeout)
     except asyncio.TimeoutError:
         return web.json_response({"error": "délai dépassé, réessaie"}, status=504)
     except Exception as exc:

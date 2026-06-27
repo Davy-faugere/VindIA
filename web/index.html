@@ -77,6 +77,26 @@
   .dl:active{background:var(--primary-hover)}
   .switch{margin-top:16px; background:none; border:none; color:var(--muted); font:inherit;
     font-size:12.5px; text-decoration:underline; cursor:pointer}
+  .actions{display:flex; gap:18px; justify-content:center}
+  .overlay{position:fixed; inset:0; background:rgba(17,24,39,.45); display:flex;
+    align-items:flex-end; justify-content:center; z-index:50}
+  .overlay[hidden]{display:none}
+  .sheet{background:#fff; width:100%; max-width:440px; border-radius:18px 18px 0 0;
+    padding:20px 18px 26px; box-shadow:0 -8px 30px rgba(0,0,0,.18)}
+  @media(min-width:480px){.overlay{align-items:center} .sheet{border-radius:18px}}
+  .sheet-head{display:flex; justify-content:space-between; align-items:center; font-weight:700; font-size:16px}
+  .sheet-x{background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer}
+  .sheet-sub{color:var(--muted); font-size:13px; margin:8px 0 14px}
+  .conn-list{display:flex; flex-direction:column; gap:10px}
+  .conn-row{display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px}
+  .conn-name{font-size:14px; font-weight:600}
+  .conn-meta{font-size:12px; color:var(--muted); margin-top:2px}
+  .conn-btn{padding:8px 13px; border:none; border-radius:10px; background:var(--primary);
+    color:#fff; font:inherit; font-size:13px; font-weight:600; cursor:pointer}
+  .conn-btn.off{background:#fff; color:var(--muted); border:1px solid #e5e7eb}
+  .conn-btn[disabled]{opacity:.5; cursor:default}
+  .sheet-note{font-size:12px; color:var(--muted); margin-top:14px; min-height:16px}
   .pending{display:none; margin-top:16px; text-align:left; background:#fff;
     border:1.5px solid var(--accent); border-radius:14px; padding:13px 15px;
     box-shadow:0 8px 22px rgba(139,92,246,.16)}
@@ -136,9 +156,24 @@
       <button id="sendBtn">Envoyer</button>
     </div>
 
-    <button id="switchAccount" class="switch">Changer de compte</button>
+    <div class="actions">
+      <button id="connectionsBtn" class="switch" type="button">Connexions</button>
+      <button id="switchAccount" class="switch">Changer de compte</button>
+    </div>
     <footer>VindIA — voix française naturelle</footer>
   </main>
+
+  <div class="overlay" id="connOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Connexions</span>
+        <button id="connClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Connecte tes comptes : VindIA n'accède qu'à <b>tes</b> données, en lecture seule.</p>
+      <div id="connList" class="conn-list"></div>
+      <p class="sheet-note" id="connNote"></p>
+    </div>
+  </div>
 
 <script>
 (() => {
@@ -319,6 +354,72 @@
   });
 
   loadProjects();
+
+  // ── Connexions : coffre par utilisateur (Google mail/agenda/drive, etc.) ──
+  const connOverlay = $('connOverlay'), connList = $('connList'), connNote = $('connNote');
+
+  async function renderConnections() {
+    connNote.textContent = '';
+    try {
+      const d = await projApi('/connections/list');
+      if (!d.vault_ready) connNote.textContent = "Le coffre sécurisé n'est pas encore activé côté serveur.";
+      connList.innerHTML = '';
+      (d.services || []).forEach(s => {
+        const row = document.createElement('div'); row.className = 'conn-row';
+        const left = document.createElement('div');
+        const name = document.createElement('div'); name.className = 'conn-name'; name.textContent = s.label;
+        left.appendChild(name);
+        if (s.connected && s.meta && s.meta.email) {
+          const m = document.createElement('div'); m.className = 'conn-meta'; m.textContent = 'Connecté : ' + s.meta.email;
+          left.appendChild(m);
+        } else if (s.soon) {
+          const m = document.createElement('div'); m.className = 'conn-meta'; m.textContent = 'Bientôt disponible';
+          left.appendChild(m);
+        } else if (!s.configured) {
+          const m = document.createElement('div'); m.className = 'conn-meta'; m.textContent = 'Non configuré côté serveur';
+          left.appendChild(m);
+        }
+        const btn = document.createElement('button'); btn.className = 'conn-btn';
+        if (s.connected) {
+          btn.textContent = 'Déconnecter'; btn.classList.add('off');
+          btn.onclick = async () => {
+            btn.disabled = true;
+            try { await projApi('/connections/disconnect', { service: s.service }); await renderConnections(); }
+            catch (e) { connNote.textContent = e.message; btn.disabled = false; }
+          };
+        } else if (s.soon || !s.configured) {
+          btn.textContent = 'Connecter'; btn.disabled = true;
+        } else {
+          btn.textContent = 'Connecter';
+          btn.onclick = async () => {
+            btn.disabled = true; connNote.textContent = 'Redirection…';
+            try {
+              const r = await projApi('/oauth/' + s.service + '/start');
+              if (r.auth_url) { window.location.href = r.auth_url; }
+              else { connNote.textContent = r.error || 'connexion impossible'; btn.disabled = false; }
+            } catch (e) { connNote.textContent = e.message; btn.disabled = false; }
+          };
+        }
+        row.appendChild(left); row.appendChild(btn);
+        connList.appendChild(row);
+      });
+    } catch (e) { connNote.textContent = e.message; }
+  }
+
+  $('connectionsBtn').addEventListener('click', () => { connOverlay.hidden = false; renderConnections(); });
+  $('connClose').addEventListener('click', () => { connOverlay.hidden = true; });
+  connOverlay.addEventListener('click', (e) => { if (e.target === connOverlay) connOverlay.hidden = true; });
+
+  // Retour de redirection OAuth (?connect=ok|refus|expire|erreur) → message + ouvre le panneau.
+  (() => {
+    const m = new URLSearchParams(location.search).get('connect');
+    if (!m) return;
+    history.replaceState(null, '', location.pathname);
+    const msg = { ok: 'Compte connecté.', refus: 'Connexion refusée.',
+                  expire: 'Lien expiré, réessaie.', erreur: 'Échec de la connexion.' }[m] || '';
+    connOverlay.hidden = false; renderConnections();
+    setTimeout(() => { connNote.textContent = msg; }, 200);
+  })();
 
   // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;

@@ -11,3 +11,10 @@ mistralai>=1.5,<2
 # livekit-api         # mint de tokens
 # piper-tts           # TTS souverain FR self-host (alternative)
 edge-tts              # voix neurale FR (gratuite) servie par web/server.py /tts
+
+# Projets & fichiers (Lot 2) :
+pypdf                 # lecture/extraction de texte des PDF uploadés (projets)
+# python-docx / openpyxl / python-pptx déjà requis par web/filegen.py (génération)
+
+# Connexions & coffre (Lot 2c) :
+cryptography          # chiffrement au repos des jetons OAuth (Fernet) — coffre credentials

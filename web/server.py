@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import secrets as _secrets
 import sys
 import time
 from collections import defaultdict
@@ -29,6 +30,8 @@ import edge_tts
 
 from filegen import build_file, OFFICE_TYPES
 from shared.agent.projects import ProjectStore, extract_text, ExtractionError
+from shared.agent.vault import CredentialVault, fernet_crypto
+from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -64,11 +67,18 @@ _store = None
 _memory = None
 _llm = None
 _projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistance disque)
+_vault = None     # CredentialVault : coffre chiffré des connexions (Google, mail…)
+_google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés absentes)
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
 # Taille max d'un fichier uploadé (anti-DoS) : 10 Mo.
 _MAX_UPLOAD = 10 * 1024 * 1024
+# URL publique (pour le redirect OAuth). Ex : https://vindia.faugere-davy.fr
+_PUBLIC_URL = os.environ.get("VINDIA_PUBLIC_URL", "").rstrip("/")
+# States OAuth en cours : state -> (member_id, timestamp monotonic). Anti-CSRF, TTL court.
+_oauth_states: dict = {}
+_OAUTH_STATE_TTL = 600.0
 
 # Rate limiting : compteur glissant par code d'accès (60 req / heure)
 _RATE_LIMIT = 60
@@ -88,11 +98,26 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects
+    global _store, _memory, _llm, _projects, _vault, _google
     if _llm is not None:
         return
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
+    # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
+    # Sans VINDIA_VAULT_KEY → pas de coffre (on refuse de stocker des jetons en clair).
+    vault_key = os.environ.get("VINDIA_VAULT_KEY", "").strip()
+    if vault_key:
+        try:
+            _vault = CredentialVault(os.path.join(_DATA_DIR, "vault"), fernet_crypto(vault_key))
+        except Exception as exc:
+            print(f"[VindIA] coffre désactivé (clé invalide ?) : {exc}")
+            _vault = None
+    # App OAuth Google : configurée si client_id/secret + URL publique présents.
+    gid = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+    gsecret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+    if gid and gsecret and _PUBLIC_URL:
+        _google = GoogleOAuth(gid, gsecret, f"{_PUBLIC_URL}/oauth/google/callback")
+        print("[VindIA] OAuth Google configuré.")
     from shared.agent.adapters import MistralLLM
     from shared.agent.tools import build_web_tool_registry
     # Accès web optionnel : activé si SEARXNG_URL est défini (souverain, self-host).
@@ -442,6 +467,122 @@ async def upload(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "filename": doc.filename, "chars": doc.chars})
 
 
+# ──────────────────────────────────────────────────────────────
+# Connexions & OAuth — coffre chiffré, par utilisateur
+# ──────────────────────────────────────────────────────────────
+
+# Catalogue des services proposés à la connexion (libellés affichés dans l'onglet).
+_SERVICE_CATALOG = [
+    {"service": "google", "label": "Google — Gmail, Agenda, Drive"},
+    {"service": "notion", "label": "Notion", "soon": True},
+    {"service": "imap", "label": "Autre messagerie (IMAP)", "soon": True},
+]
+
+
+async def connections_list(request: web.Request) -> web.Response:
+    """POST /connections/list {code} → état des connexions du membre (sans secrets)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    member_id = _member_of((data.get("code") or "").strip())
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    connected = {}
+    if _vault is not None:
+        connected = {c.service: c.as_dict() for c in _vault.list_connections(member_id)}
+    items = []
+    for entry in _SERVICE_CATALOG:
+        svc = entry["service"]
+        configured = svc == "google" and _google is not None and _google.configured
+        items.append({
+            "service": svc,
+            "label": entry["label"],
+            "soon": entry.get("soon", False),
+            "configured": configured,
+            "connected": svc in connected,
+            "meta": connected.get(svc, {}).get("meta", {}),
+        })
+    return web.json_response({"vault_ready": _vault is not None, "services": items})
+
+
+async def connections_disconnect(request: web.Request) -> web.Response:
+    """POST /connections/disconnect {code, service} → retire la connexion (efface les secrets)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    code = (data.get("code") or "").strip()
+    member_id = _member_of(code)
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    service = (data.get("service") or "").strip()
+    removed = _vault.delete(member_id, service) if _vault is not None else False
+    return web.json_response({"ok": True, "removed": removed})
+
+
+def _prune_oauth_states() -> None:
+    now = time.monotonic()
+    for st in [s for s, (_, ts) in _oauth_states.items() if now - ts > _OAUTH_STATE_TTL]:
+        _oauth_states.pop(st, None)
+
+
+async def oauth_google_start(request: web.Request) -> web.Response:
+    """POST /oauth/google/start {code} → {auth_url} vers lequel la page redirige."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    code = (data.get("code") or "").strip()
+    member_id = _member_of(code)
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    if _vault is None:
+        return web.json_response({"error": "coffre non configuré (VINDIA_VAULT_KEY manquante)"}, status=503)
+    if _google is None or not _google.configured:
+        return web.json_response({"error": "Google non configuré côté serveur"}, status=503)
+    _prune_oauth_states()
+    state = _secrets.token_urlsafe(24)
+    _oauth_states[state] = (member_id, time.monotonic())
+    return web.json_response({"auth_url": _google.build_auth_url(state)})
+
+
+async def oauth_google_callback(request: web.Request) -> web.Response:
+    """GET /oauth/google/callback?code&state → Google redirige ici après consentement."""
+    if request.query.get("error"):
+        raise web.HTTPFound("/?connect=refus")
+    code = request.query.get("code") or ""
+    state = request.query.get("state") or ""
+    _prune_oauth_states()
+    entry = _oauth_states.pop(state, None)
+    if entry is None:
+        raise web.HTTPFound("/?connect=expire")
+    member_id, _ = entry
+    _init_services()
+    if _google is None or _vault is None:
+        raise web.HTTPFound("/?connect=erreur")
+    try:
+        token = await _google.exchange_code(code)
+        info = await _google.fetch_userinfo(token.get("access_token", ""))
+        secrets_payload = secrets_from_token_response(token)
+        # Reconnexion : Google peut ne pas renvoyer de refresh_token → garder l'ancien.
+        if not secrets_payload.get("refresh_token"):
+            old = _vault.get_secrets(member_id, "google") or {}
+            if old.get("refresh_token"):
+                secrets_payload["refresh_token"] = old["refresh_token"]
+        _vault.store(
+            member_id, "google", secrets_payload,
+            meta={"email": info.get("email", ""), "name": info.get("name", ""), "scope": token.get("scope", "")},
+        )
+    except Exception as exc:
+        print(f"[VindIA] OAuth Google callback: {exc}")
+        raise web.HTTPFound("/?connect=erreur")
+    raise web.HTTPFound("/?connect=ok")
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
@@ -456,6 +597,10 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/create", projects_create)
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/upload", upload)
+    app.router.add_post("/connections/list", connections_list)
+    app.router.add_post("/connections/disconnect", connections_disconnect)
+    app.router.add_post("/oauth/google/start", oauth_google_start)
+    app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/{name}", static_file)
     return app
 

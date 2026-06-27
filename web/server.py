@@ -53,6 +53,7 @@ _CODE_MAP: dict[str, dict] = {
     os.environ.get("VINDIA_CODE_DAVY", "kV7p-Faugere-2026"): {
         "display_name": "Davy",
         "member_id": "00000001-0001-0001-0002-000000000001",
+        "admin": True,  # seul l'admin a les outils sensibles (état du VPS)
     },
     os.environ.get("VINDIA_CODE_LUDIVINE", "Ludivine-MLM-2026"): {
         "display_name": "Ludivine",
@@ -71,6 +72,7 @@ _llm = None
 _projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistance disque)
 _vault = None     # CredentialVault : coffre chiffré des connexions (Google, mail…)
 _google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés absentes)
+_vps_tools = []   # outils VPS (lecture seule) — RÉSERVÉS à l'admin, hors registre global
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
@@ -106,7 +108,7 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools
     if _llm is not None:
         return
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
@@ -128,16 +130,17 @@ def _init_services() -> None:
         print("[VindIA] OAuth Google configuré.")
     from shared.agent.adapters import MistralLLM
     from shared.agent.tools import build_web_tool_registry
-    # Outils globaux : accès web (si SEARXNG_URL) + connecteur VPS lecture seule
-    # (si MCP_OPS_URL + MCP_API_KEY). Absents → VindIA répond sans ces outils.
     from shared.agent.vps_ops import build_vps_tools
-    global_tools = build_web_tool_registry() or ToolRegistry()
-    for _t in build_vps_tools():
-        global_tools.register(_t)
-    _web_tools = global_tools if len(global_tools) else None
+    # Outils GLOBAUX (tous les utilisateurs) : accès web seulement (info publique).
+    _web_tools = build_web_tool_registry()
     _llm = MistralLLM(tools=_web_tools)
     if _web_tools:
-        print(f"[VindIA] Outils globaux actifs ({len(_web_tools)}).")
+        print(f"[VindIA] Accès web activé ({len(_web_tools)} outils).")
+    # Outils ADMIN (réservés à Davy) : état du VPS. PAS dans le registre global →
+    # Ludivine / Invité ne peuvent jamais les invoquer. Injectés par /ask si admin.
+    _vps_tools = build_vps_tools()
+    if _vps_tools:
+        print(f"[VindIA] Connecteur VPS actif ({len(_vps_tools)} outils, admin only).")
     try:
         from server.db import open_store
         from shared.agent.memory import MemoryStore
@@ -318,11 +321,14 @@ async def ask(request: web.Request) -> web.Response:
     _init_services()
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
-    # Outils du projet actif (lire/écrire à la demande), scopés à CE membre + projet.
-    extra_tools = None
+    # Outils de session : projet actif (lire/écrire, scopé membre+projet) + VPS si admin.
+    session_tools = []
     active_pid = _active_project.get(code)
     if active_pid and _projects is not None:
-        extra_tools = ToolRegistry(build_project_tools(_projects, _member_of(code), active_pid))
+        session_tools += build_project_tools(_projects, _member_of(code), active_pid)
+    if _CODE_MAP.get(code, {}).get("admin") and _vps_tools:
+        session_tools += _vps_tools  # état du VPS : ADMIN uniquement
+    extra_tools = ToolRegistry(session_tools) if session_tools else None
     # Avec outils (web et/ou projet), un énoncé peut enchaîner plusieurs appels :
     # on laisse plus de marge qu'une réponse LLM directe.
     timeout = 60.0 if (getattr(_llm, "_tools", None) or extra_tools) else 30.0

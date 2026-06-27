@@ -159,6 +159,7 @@
     </div>
 
     <div class="actions">
+      <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button">Connexions</button>
       <button id="switchAccount" class="switch">Changer de compte</button>
     </div>
@@ -174,6 +175,18 @@
       <p class="sheet-sub">Connecte tes comptes : VindIA n'accède qu'à <b>tes</b> données, en lecture seule.</p>
       <div id="connList" class="conn-list"></div>
       <p class="sheet-note" id="connNote"></p>
+    </div>
+  </div>
+
+  <div class="overlay" id="memOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Ma mémoire</span>
+        <button id="memClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Ce que VindIA a retenu sur toi. Tu peux effacer ce que tu veux.</p>
+      <div id="memList" class="conn-list"></div>
+      <p class="sheet-note" id="memNote"></p>
     </div>
   </div>
 
@@ -448,6 +461,37 @@
     connOverlay.hidden = false; renderConnections();
     setTimeout(() => { connNote.textContent = msg; }, 200);
   })();
+
+  // ── Ma mémoire : l'utilisateur voit et efface ce que VindIA retient sur lui ──
+  const memOverlay = $('memOverlay'), memList = $('memList'), memNote = $('memNote');
+
+  async function renderMemory() {
+    memNote.textContent = ''; memList.innerHTML = '';
+    try {
+      const d = await projApi('/memory/list');
+      if (!d.enabled) { memNote.textContent = "La mémoire n'est pas active côté serveur."; return; }
+      const items = d.memories || [];
+      if (!items.length) { memNote.textContent = "VindIA n'a encore rien retenu sur toi."; return; }
+      items.forEach(it => {
+        const row = document.createElement('div'); row.className = 'conn-row';
+        const left = document.createElement('div'); left.className = 'conn-name';
+        left.textContent = it.content; left.style.fontWeight = '500';
+        const btn = document.createElement('button'); btn.className = 'conn-btn off';
+        btn.textContent = 'Oublier';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try { await projApi('/memory/forget', { id: it.id }); await renderMemory(); }
+          catch (e) { memNote.textContent = e.message; btn.disabled = false; }
+        };
+        row.appendChild(left); row.appendChild(btn);
+        memList.appendChild(row);
+      });
+    } catch (e) { memNote.textContent = e.message; }
+  }
+
+  $('memoryBtn').addEventListener('click', () => { memOverlay.hidden = false; renderMemory(); });
+  $('memClose').addEventListener('click', () => { memOverlay.hidden = true; });
+  memOverlay.addEventListener('click', (e) => { if (e.target === memOverlay) memOverlay.hidden = true; });
 
   // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;

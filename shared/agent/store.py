@@ -120,6 +120,28 @@ class Store:
         )
         return [row[0] for row in cur.fetchall()]
 
+    def list_memories(self, member_id: str) -> list:
+        """Souvenirs du membre avec leur id (pour l'écran « Ma mémoire »).
+
+        Plus récent d'abord. L'id permet à l'utilisateur d'effacer un souvenir précis.
+        """
+        cur = self._exec(
+            "SELECT id, content, created_at FROM member_memories "
+            "WHERE member_id = ? ORDER BY created_at DESC",
+            (member_id,),
+        )
+        return [{"id": r[0], "content": r[1], "created_at": str(r[2])} for r in cur.fetchall()]
+
+    def delete_memory(self, member_id: str, memory_id: str) -> bool:
+        """Supprime UN souvenir. Le filtre member_id garantit l'isolation : un
+        membre ne peut effacer que SES souvenirs, jamais ceux d'un autre."""
+        cur = self._exec(
+            "DELETE FROM member_memories WHERE id = ? AND member_id = ?",
+            (memory_id, member_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     def save_memory(
         self, member_id: str, tenant_id: str, session_id: Optional[str], content: str
     ) -> str:

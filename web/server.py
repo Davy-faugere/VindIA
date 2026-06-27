@@ -603,6 +603,45 @@ async def oauth_google_callback(request: web.Request) -> web.Response:
     raise web.HTTPFound("/?connect=ok")
 
 
+# ──────────────────────────────────────────────────────────────
+# Mémoire — l'utilisateur voit et gère ce que VindIA retient sur lui
+# ──────────────────────────────────────────────────────────────
+
+async def memory_list(request: web.Request) -> web.Response:
+    """POST /memory/list {code} → souvenirs du membre (id + texte). Isolé par code."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    member_id = _member_of((data.get("code") or "").strip())
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    if _store is None:
+        return web.json_response({"enabled": False, "memories": []})
+    return web.json_response({"enabled": True, "memories": _store.list_memories(member_id)})
+
+
+async def memory_forget(request: web.Request) -> web.Response:
+    """POST /memory/forget {code, id} → efface UN souvenir du membre (RGPD/contrôle)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    code = (data.get("code") or "").strip()
+    member_id = _member_of(code)
+    if member_id is None:
+        return web.json_response({"error": "code invalide"}, status=401)
+    _init_services()
+    if _store is None:
+        return web.json_response({"ok": True, "removed": False})
+    removed = _store.delete_memory(member_id, (data.get("id") or "").strip())
+    # Rafraîchit la mémoire injectée dans la session courante (le souvenir effacé disparaît).
+    if removed and _llm is not None and _memory is not None:
+        _llm.load_memory(code, _memory.load_context(member_id))
+    return web.json_response({"ok": True, "removed": removed})
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
@@ -619,6 +658,8 @@ def build_app() -> web.Application:
     app.router.add_post("/upload", upload)
     app.router.add_post("/connections/list", connections_list)
     app.router.add_post("/connections/disconnect", connections_disconnect)
+    app.router.add_post("/memory/list", memory_list)
+    app.router.add_post("/memory/forget", memory_forget)
     app.router.add_post("/oauth/google/start", oauth_google_start)
     app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/{name}", static_file)

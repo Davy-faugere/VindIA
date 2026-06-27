@@ -107,6 +107,42 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(s.trim_memories(mid, 5), 0)
         self.assertEqual(len(s.get_memories(mid)), 1)
 
+    def test_list_memories_returns_id_and_content(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid, "Davy")
+        s.save_memory(mid, tid, "s1", "fait A")
+        s.save_memory(mid, tid, "s1", "fait B")
+        items = s.list_memories(mid)
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all("id" in it and "content" in it for it in items))
+        self.assertTrue(all(is_valid_id(it["id"]) for it in items))
+        self.assertEqual({it["content"] for it in items}, {"fait A", "fait B"})
+
+    def test_delete_memory_removes_one(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        mid = s.create_member(tid, "Davy")
+        s.save_memory(mid, tid, "s1", "à garder")
+        s.save_memory(mid, tid, "s1", "à effacer")
+        target = [it for it in s.list_memories(mid) if it["content"] == "à effacer"][0]
+        self.assertTrue(s.delete_memory(mid, target["id"]))
+        remaining = s.get_memories(mid)
+        self.assertEqual(remaining, ["à garder"])
+        # Idempotent : re-supprimer renvoie False.
+        self.assertFalse(s.delete_memory(mid, target["id"]))
+
+    def test_delete_memory_isolated_to_member(self):
+        s = fresh_store()
+        tid = s.create_tenant("ACME")
+        alice = s.create_member(tid, "Alice")
+        bob = s.create_member(tid, "Bob")
+        s.save_memory(alice, tid, "s1", "secret Alice")
+        aid = s.list_memories(alice)[0]["id"]
+        # Bob ne peut PAS effacer le souvenir d'Alice (member_id filtré).
+        self.assertFalse(s.delete_memory(bob, aid))
+        self.assertEqual(len(s.get_memories(alice)), 1)
+
     def test_trim_memories_exact_limit_is_noop(self):
         s = fresh_store()
         tid = s.create_tenant("ACME")

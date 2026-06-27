@@ -37,9 +37,11 @@ class MemoryStore:
     - extract_and_save : async, appelé (fire-and-forget) à la fermeture.
     """
 
-    def __init__(self, db: Store, transport: LlmTransport) -> None:
+    def __init__(self, db: Store, transport: LlmTransport, *, max_memories: int = 100) -> None:
         self._db = db
         self._transport = transport
+        # Volume long-terme conservé par membre (au-delà, on élague les plus anciens).
+        self._max_memories = max_memories
 
     def load_context(self, member_id: str) -> str:
         """Retourne un bloc texte à injecter dans le system prompt, ou '' si vide."""
@@ -80,5 +82,5 @@ class MemoryStore:
                 self._db.save_memory(member_id, tenant_id, session_id, fact.strip())
                 saved += 1
         if saved:
-            self._db.trim_memories(member_id, 30)
+            self._db.trim_memories(member_id, self._max_memories)
         return saved

@@ -57,6 +57,12 @@ class MistralLLMTest(unittest.TestCase):
         self.assertEqual(captured["messages"][0]["content"], VINDIA_SYSTEM_PROMPT)
         self.assertEqual(captured["messages"][-1], {"role": "user", "content": "bonjour"})
 
+    def test_system_prompt_instructs_file_creation(self):
+        # VindIA doit savoir produire un document téléchargeable via [[FICHIER:…]].
+        from shared.agent.adapters import VINDIA_SYSTEM_PROMPT
+        self.assertIn("[[FICHIER:", VINDIA_SYSTEM_PROMPT)
+        self.assertIn("[[/FICHIER]]", VINDIA_SYSTEM_PROMPT)
+
     def test_history_accumulates_across_turns(self):
         calls = []
 

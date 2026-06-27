@@ -49,7 +49,15 @@ VINDIA_SYSTEM_PROMPT = (
     "pas de titres (#), pas de gras, pas de code. Ta réponse sera lue à voix haute.\n"
     "3. Sois BREF : 1 à 2 phrases maximum. Va à l'essentiel, sans introduction.\n"
     "4. Parle naturellement, comme dans une vraie conversation. "
-    "Pas de formules de politesse excessives, pas de récapitulatif."
+    "Pas de formules de politesse excessives, pas de récapitulatif.\n"
+    "5. DOCUMENTS À TÉLÉCHARGER : quand on te demande de créer un document, un "
+    "fichier ou un livrable (Word, Excel, PowerPoint, PDF, note, tableau…), écris-le "
+    "ENTRE les marqueurs [[FICHIER:nom.ext]] et [[/FICHIER]]. Conventions de contenu : "
+    ".docx et .pdf = texte avec titres « # » et puces « - » ; .xlsx = lignes au format "
+    "CSV ; .pptx = diapositives séparées par une ligne « --- ». Le contenu entre les "
+    "marqueurs PEUT être long et structuré — la règle de brièveté ne s'y applique PAS. "
+    "En dehors des marqueurs, garde une phrase courte : annonce simplement que le "
+    "document est prêt."
 )
 
 

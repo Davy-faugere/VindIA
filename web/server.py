@@ -128,12 +128,16 @@ def _init_services() -> None:
         print("[VindIA] OAuth Google configuré.")
     from shared.agent.adapters import MistralLLM
     from shared.agent.tools import build_web_tool_registry
-    # Accès web optionnel : activé si SEARXNG_URL est défini (souverain, self-host).
-    # Absent → VindIA répond sans outils (comportement historique).
-    _web_tools = build_web_tool_registry()
+    # Outils globaux : accès web (si SEARXNG_URL) + connecteur VPS lecture seule
+    # (si MCP_OPS_URL + MCP_API_KEY). Absents → VindIA répond sans ces outils.
+    from shared.agent.vps_ops import build_vps_tools
+    global_tools = build_web_tool_registry() or ToolRegistry()
+    for _t in build_vps_tools():
+        global_tools.register(_t)
+    _web_tools = global_tools if len(global_tools) else None
     _llm = MistralLLM(tools=_web_tools)
     if _web_tools:
-        print(f"[VindIA] Accès web activé ({len(_web_tools)} outils).")
+        print(f"[VindIA] Outils globaux actifs ({len(_web_tools)}).")
     try:
         from server.db import open_store
         from shared.agent.memory import MemoryStore

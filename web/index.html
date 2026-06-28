@@ -114,6 +114,16 @@
   .pending-bar span.run{transition:transform var(--confirm,4000ms) linear; transform:scaleX(0)}
   .err{color:#b91c1c; font-size:13px; margin-top:12px; min-height:18px}
   footer{margin-top:18px; font-size:11px; color:var(--muted)}
+  .login{position:fixed; inset:0; background:radial-gradient(1200px 700px at 50% -10%, var(--soft), var(--bg) 60%);
+    display:flex; align-items:center; justify-content:center; padding:24px; z-index:100}
+  .login[hidden]{display:none}
+  .login-card{width:100%; max-width:380px; background:#fff; border:1px solid #ececf6; border-radius:var(--radius);
+    box-shadow:0 20px 50px rgba(79,70,229,.10); padding:30px 24px; text-align:center; display:flex; flex-direction:column; gap:12px}
+  .login-card input{padding:12px 14px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:15px; outline:none}
+  .login-card input:focus{border-color:var(--accent)}
+  .login-card button{padding:12px; border:none; border-radius:12px; background:var(--primary); color:#fff; font:inherit; font-weight:700; font-size:15px; cursor:pointer}
+  .login-card button:active{background:var(--primary-hover)}
+  .login-err{color:#b91c1c; font-size:13px; min-height:18px; margin:0}
 </style>
 </head>
 <body data-state="idle">
@@ -203,38 +213,79 @@
     </div>
   </div>
 
+  <div class="login" id="loginScreen" hidden>
+    <form class="login-card" id="loginForm">
+      <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
+      <p class="sub">Connecte-toi pour continuer</p>
+      <input id="loginEmail" type="email" placeholder="Adresse e-mail" autocomplete="username" required />
+      <input id="loginPass" type="password" placeholder="Mot de passe" autocomplete="current-password" required />
+      <button id="loginBtn" type="submit">Se connecter</button>
+      <p class="login-err" id="loginErr"></p>
+    </form>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (() => {
-  // Code d'accès (verrou) : demandé une fois, gardé localement sur l'appareil.
-  function getCode() {
-    let c = localStorage.getItem('vindia_code');
-    if (!c) { c = (prompt("Code d'accès VindIA :") || '').trim(); if (c) localStorage.setItem('vindia_code', c); }
-    return c;
-  }
   const $ = (id) => document.getElementById(id);
   const body = document.body, orb = $('orb'), stateEl = $('state'), hint = $('hint'),
         errEl = $('err'), tr = $('transcript'), textInput = $('textInput'), sendBtn = $('sendBtn'),
         sub = $('sub');
 
-  // ── Identification au démarrage ───────────────────────────────────────────
+  // ── Authentification : vrai login Supabase (email + mot de passe) ──────────
+  // Clés PUBLIQUES (anon) — conçues pour le navigateur ; la sécurité réelle tient
+  // à la validation du jeton côté serveur VindIA.
+  const SUPABASE_URL = 'https://csvbxhaqvqcslxvljtlb.supabase.co';
+  const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzdmJ4aGFxdnFjc2x4dmxqdGxiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3ODA3MTgsImV4cCI6MjA5MDM1NjcxOH0.M06Q319kRwn0J7LnU-yQtj_FifMtTNKZzTcQ2rYxZkk';
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+  const loginScreen = $('loginScreen');
+  function showLogin() { loginScreen.hidden = false; }
+  function hideLogin() { loginScreen.hidden = true; }
+
+  // Jeton d'accès courant (supabase-js gère le rafraîchissement automatiquement).
+  async function authHeaders(extra) {
+    const { data } = await sb.auth.getSession();
+    const t = (data.session && data.session.access_token) || '';
+    return Object.assign({ 'Authorization': 'Bearer ' + t }, extra || {});
+  }
+
   let _displayName = '';
-  async function resolveIdentity(code) {
-    if (!code) return;
+  async function resolveIdentity() {
     try {
-      const r = await fetch('/auth', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code })
-      });
-      if (r.status === 401) { localStorage.removeItem('vindia_code'); return; }
+      const r = await fetch('/auth', { method: 'POST', headers: await authHeaders() });
+      if (r.status === 401) { showLogin(); return false; }
       const d = await r.json();
       if (d.ok) {
         _displayName = d.display_name || '';
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
+        hideLogin();
+        return true;
       }
-    } catch (e) { /* serveur non dispo : mode dégradé silencieux */ }
+    } catch (e) { /* serveur non dispo */ }
+    return false;
   }
-  resolveIdentity(localStorage.getItem('vindia_code') || getCode());
+
+  // Login : email + mot de passe.
+  $('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = $('loginEmail').value.trim(), pass = $('loginPass').value;
+    const btn = $('loginBtn'), err = $('loginErr');
+    err.textContent = ''; btn.disabled = true; btn.textContent = 'Connexion…';
+    try {
+      const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+      if (error) { err.textContent = 'Identifiants incorrects.'; }
+      else { $('loginPass').value = ''; await resolveIdentity(); }
+    } catch (e) { err.textContent = 'Connexion impossible, réessaie.'; }
+    finally { btn.disabled = false; btn.textContent = 'Se connecter'; }
+  });
+
+  // Au démarrage : session existante → on entre ; sinon → écran de login.
+  (async () => {
+    const { data } = await sb.auth.getSession();
+    if (data.session) { await resolveIdentity(); } else { showLogin(); }
+  })();
 
   // Retire tout markdown/symbole (Mistral désobéit au prompt, on nettoie côté client)
   const clean = (t) => (t || '')
@@ -312,12 +363,11 @@
         attachBtn = $('attachBtn'), fileInput = $('fileInput');
 
   async function projApi(path, payload) {
-    const code = localStorage.getItem('vindia_code') || '';
     const r = await fetch(path, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ code }, payload || {}))
+      method: 'POST', headers: await authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload || {})
     });
-    if (r.status === 401) { localStorage.removeItem('vindia_code'); throw new Error("code refusé"); }
+    if (r.status === 401) { showLogin(); throw new Error("session expirée, reconnecte-toi"); }
     return r.json();
   }
 
@@ -364,15 +414,13 @@
     const kept = all.filter(f => OK_EXT.includes(extOf(f.name)) && f.size > 0);
     if (!kept.length) { errEl.textContent = 'Aucun fichier exploitable sélectionné.'; return; }
     errEl.textContent = '';
-    const code = localStorage.getItem('vindia_code') || '';
     const fd = new FormData();
-    fd.append('code', code);
     fd.append('project_id', projSelect.value);
     kept.forEach(f => fd.append('file', f, f.name));
     attachBtn.disabled = true; folderBtn.disabled = true;
     const prev = attachBtn.textContent; attachBtn.textContent = '… ' + kept.length;
     try {
-      const r = await fetch('/upload', { method: 'POST', body: fd });
+      const r = await fetch('/upload', { method: 'POST', headers: await authHeaders(), body: fd });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || ('upload ' + r.status));
       const n = (d.added || []).length, sk = (d.skipped || []).length;
@@ -651,10 +699,10 @@
     setState('thinking', '<span class="live">VindIA réfléchit…</span>');
     try {
       const r = await fetch('/ask', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, code: getCode() })
+        method: 'POST', headers: await authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ message })
       });
-      if (r.status === 401) { localStorage.removeItem('vindia_code'); throw new Error("code d'accès refusé"); }
+      if (r.status === 401) { showLogin(); throw new Error("session expirée, reconnecte-toi"); }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       const raw = (data && data.reply) ? data.reply : "(réponse vide)";
@@ -776,21 +824,18 @@
     conversing ? stopConversation() : startConversation();
   });
 
-  // Changer de compte : sauvegarde la mémoire, oublie le code, redemande un nouveau
+  // Se déconnecter : sauvegarde la mémoire de la session, ferme la session Supabase,
+  // et réaffiche l'écran de login.
+  $('switchAccount').textContent = 'Se déconnecter';
   $('switchAccount').addEventListener('click', async () => {
     if (conversing) stopConversation();
-    const oldCode = localStorage.getItem('vindia_code');
-    if (oldCode) {
-      try { await fetch('/session/end', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: oldCode }) }); } catch (e) {}
-    }
-    localStorage.removeItem('vindia_code');
+    try { await fetch('/session/end', { method: 'POST', headers: await authHeaders() }); } catch (e) {}
+    await sb.auth.signOut();
     _displayName = '';
     sub.textContent = 'Assistant vocal — en français';
     tr.innerHTML = ''; tr.classList.remove('show');
     errEl.textContent = '';
-    const c = getCode();
-    if (c) await resolveIdentity(c);
-    hint.textContent = c ? (_displayName ? 'Bonjour ' + _displayName + ', appuie pour démarrer.' : 'Compte changé. Appuie pour démarrer.') : 'Aucun code saisi.';
+    showLogin();
   });
 
   // PWA : enregistrement du service worker (installable comme une app)

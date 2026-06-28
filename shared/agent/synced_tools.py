@@ -15,11 +15,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from .projects import ExtractionError, extract_text
+from .projects import ExtractionError, extract_text, safe_filename
 from .tools import Tool, ToolSpec
 
 # Fichiers internes Syncthing à masquer.
 _HIDDEN = {".stfolder", ".stignore", ".stversions"}
+# Sous-dossier où VindIA dépose ses créations (redescend sur le PC, sans toucher
+# aux fichiers sources de l'utilisateur).
+_CREATIONS = "Créations VindIA"
 
 
 def _safe_under(base: Path, rel: str) -> Path:
@@ -105,6 +108,43 @@ class SyncedReadTool(Tool):
         return text
 
 
+class SyncedWriteTool(Tool):
+    """Crée un fichier dans « Créations VindIA » (redescend automatiquement sur le PC)."""
+
+    def __init__(self, base_dir: str) -> None:
+        self._base = Path(base_dir)
+        self.spec = ToolSpec(
+            name="synced_write_file",
+            description=(
+                "Crée un fichier texte/markdown dans le dossier de l'utilisateur "
+                "(sous-dossier « Créations VindIA »), automatiquement récupéré sur son "
+                "ordinateur. À utiliser pour LIVRER un document, une note, un compte-rendu "
+                "ou une transcription que l'utilisateur veut retrouver sur son PC."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Nom du fichier, ex. compte-rendu.md"},
+                    "content": {"type": "string", "description": "Contenu texte complet."},
+                },
+                "required": ["filename", "content"],
+            },
+        )
+
+    async def run(self, args: dict) -> str:
+        filename = safe_filename(args.get("filename") or "")
+        content = args.get("content") or ""
+        if not content.strip():
+            return "Erreur : contenu vide, rien à écrire."
+        dest = self._base / _CREATIONS
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / filename).write_text(content, encoding="utf-8")
+        return (
+            f"Fichier « {filename} » créé dans « {_CREATIONS} ». "
+            "Il apparaîtra dans ton dossier synchronisé sur ton ordinateur."
+        )
+
+
 def build_synced_tools(base_dir: str) -> List[Tool]:
-    """Outils de lecture du dossier synchronisé (liste + lecture)."""
-    return [SyncedListTool(base_dir), SyncedReadTool(base_dir)]
+    """Outils du dossier synchronisé : lister, lire, et écrire (créations)."""
+    return [SyncedListTool(base_dir), SyncedReadTool(base_dir), SyncedWriteTool(base_dir)]

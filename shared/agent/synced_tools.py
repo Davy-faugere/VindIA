@@ -108,11 +108,22 @@ class SyncedReadTool(Tool):
         return text
 
 
-class SyncedWriteTool(Tool):
-    """Crée un fichier dans « Créations VindIA » (redescend automatiquement sur le PC)."""
+# Extensions converties en VRAI binaire bureautique (sinon écrites en texte).
+_OFFICE_EXT = {"docx", "xlsx", "pptx", "pdf"}
 
-    def __init__(self, base_dir: str) -> None:
+
+class SyncedWriteTool(Tool):
+    """Crée un fichier dans « Créations VindIA » (redescend automatiquement sur le PC).
+
+    Pour un format bureautique (.docx/.xlsx/.pptx/.pdf), le contenu est converti en
+    VRAI binaire (même générateur que le téléchargement) → le fichier est lisible sur
+    le PC. Pour le reste (.md/.txt…), le texte est écrit tel quel. `office_builder`
+    injectable pour les tests.
+    """
+
+    def __init__(self, base_dir: str, *, office_builder=None) -> None:
         self._base = Path(base_dir)
+        self._office_builder = office_builder
         self.spec = ToolSpec(
             name="synced_write_file",
             description=(
@@ -138,11 +149,27 @@ class SyncedWriteTool(Tool):
             return "Erreur : contenu vide, rien à écrire."
         dest = self._base / _CREATIONS
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / filename).write_text(content, encoding="utf-8")
+        ext = Path(filename).suffix.lower().lstrip(".")
+        if ext in _OFFICE_EXT:
+            # Vrai binaire bureautique (sinon le fichier serait illisible sur le PC).
+            builder = self._office_builder or _default_office_builder
+            try:
+                payload, _ = builder(filename, content)
+            except Exception as exc:  # noqa: BLE001
+                return f"Génération du fichier impossible : {str(exc)[:160]}"
+            (dest / filename).write_bytes(payload)
+        else:
+            (dest / filename).write_text(content, encoding="utf-8")
         return (
             f"Fichier « {filename} » créé dans « {_CREATIONS} ». "
             "Il apparaîtra dans ton dossier synchronisé sur ton ordinateur."
         )
+
+
+def _default_office_builder(name: str, content: str):  # pragma: no cover - dépend des libs Office
+    from .officegen import build_file
+
+    return build_file(name, content)
 
 
 def build_synced_tools(base_dir: str) -> List[Tool]:

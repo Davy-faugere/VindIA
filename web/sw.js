@@ -1,5 +1,5 @@
 // Service worker minimal : rend VindIA installable (PWA) + fonctionne hors-ligne pour la coquille.
-const CACHE = 'vindia-v16';
+const CACHE = 'vindia-v17';
 const ASSETS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (e) => {

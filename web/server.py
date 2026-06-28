@@ -37,6 +37,7 @@ from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
 from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
+from shared.agent.synced_tools import build_synced_tools
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -344,6 +345,9 @@ async def ask(request: web.Request) -> web.Response:
             _llm.load_project(member_id, _projects.build_index(member_id, active_pid))
     if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement
+    if ident["admin"]:
+        # Dossier PC synchronisé (Syncthing) — lecture seule, ADMIN uniquement.
+        session_tools += build_synced_tools(os.path.join(_DATA_DIR, "synced"))
     extra_tools = ToolRegistry(session_tools) if session_tools else None
     # Avec outils (web et/ou projet), un énoncé peut enchaîner plusieurs appels :
     # on laisse plus de marge qu'une réponse LLM directe.

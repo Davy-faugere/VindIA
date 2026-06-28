@@ -34,6 +34,7 @@ from shared.agent.vault import CredentialVault, fernet_crypto
 from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 from shared.agent.project_tools import build_project_tools
 from shared.agent.tools import ToolRegistry
+from shared.agent.supabase_auth import SupabaseAuth, bearer_token
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -45,30 +46,21 @@ TTS_VOICE = os.environ.get("VINDIA_TTS_VOICE", "fr-FR-VivienneMultilingualNeural
 TTS_RATE = os.environ.get("VINDIA_TTS_RATE", "-6%")
 
 # ──────────────────────────────────────────────────────────────
-# Identités VindIA : code d'accès → profil + member_id fixe
-# (IDs déterministes : pas de collision avec les UUIDs générés)
+# Identités VindIA : VRAI login (Supabase Auth, email/mot de passe).
+# La page envoie le jeton Supabase (en-tête Authorization: Bearer …) ; le serveur
+# le valide → member_id = id Supabase, email, admin. Plus de code partagé.
 # ──────────────────────────────────────────────────────────────
 _TENANT_ID = "00000001-0001-0001-0001-000000000001"
-_CODE_MAP: dict[str, dict] = {
-    os.environ.get("VINDIA_CODE_DAVY", "kV7p-Faugere-2026"): {
-        "display_name": "Davy",
-        "member_id": "00000001-0001-0001-0002-000000000001",
-        "admin": True,  # seul l'admin a les outils sensibles (état du VPS)
-    },
-    os.environ.get("VINDIA_CODE_LUDIVINE", "Ludivine-MLM-2026"): {
-        "display_name": "Ludivine",
-        "member_id": "00000001-0001-0001-0003-000000000001",
-    },
-    os.environ.get("VINDIA_CODE_INVITE", "Invite-VindIA-2026"): {
-        "display_name": "Invité",
-        "member_id": "00000001-0001-0001-0004-000000000001",
-    },
-}
+# Emails admin (outils VPS) — liste blanche, séparés par des virgules.
+_ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get("VINDIA_ADMIN_EMAILS", "").split(",") if e.strip()]
+_SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+_SUPABASE_ANON = os.environ.get("SUPABASE_ANON_KEY", "").strip()
 
 # Services lazily initialisés (MariaDB optionnel : la mémoire est désactivée si absent)
 _store = None
 _memory = None
 _llm = None
+_auth = None      # SupabaseAuth : valide les jetons de login (None si non configuré)
 _projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistance disque)
 _vault = None     # CredentialVault : coffre chiffré des connexions (Google, mail…)
 _google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés absentes)
@@ -108,9 +100,14 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth
     if _llm is not None:
         return
+    # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
+    # s'authentifier (toutes les routes protégées renverront 401).
+    if _SUPABASE_URL and _SUPABASE_ANON:
+        _auth = SupabaseAuth(_SUPABASE_URL, _SUPABASE_ANON, _ADMIN_EMAILS)
+        print(f"[VindIA] Auth Supabase configurée (admins: {len(_ADMIN_EMAILS)}).")
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
     # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
@@ -145,10 +142,9 @@ def _init_services() -> None:
         from server.db import open_store
         from shared.agent.memory import MemoryStore
         _store = open_store()
-        # Bootstrap : crée le tenant et les membres si absents.
+        # Bootstrap : crée le tenant. Les membres sont créés à la volée au login
+        # (member_id = id Supabase), cf. _identify().
         _store.ensure_tenant(_TENANT_ID, "VindIA")
-        for profile in _CODE_MAP.values():
-            _store.ensure_member(profile["member_id"], _TENANT_ID, profile["display_name"])
         # Transport Mistral léger pour l'extraction (modèle small → économique).
         async def _extract_transport(messages):  # type: ignore[return]
             from mistralai import Mistral
@@ -254,29 +250,25 @@ async def build(request: web.Request) -> web.Response:
 
 
 async def auth(request: web.Request) -> web.Response:
-    """Identifie l'utilisateur, charge sa mémoire dans le LLM.
+    """Vérifie le login (jeton Supabase) et charge la mémoire de l'utilisateur.
 
-    POST /auth  body: {code}  → {ok, display_name, has_memory}
-    (POST pour éviter que le code d'accès apparaisse en clair dans les logs nginx)
+    POST /auth  (en-tête Authorization: Bearer <jeton>)  → {ok, display_name, admin, has_memory}
     """
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    if code not in _CODE_MAP:
-        return web.json_response({"ok": False, "error": "code invalide"}, status=401)
-    _init_services()
-    profile = _CODE_MAP[code]
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"ok": False, "error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     has_memory = False
     if _memory and _llm:
-        ctx = _memory.load_context(profile["member_id"])
+        ctx = _memory.load_context(member_id)
         if ctx:
-            _llm.load_memory(code, ctx)
+            _llm.load_memory(member_id, ctx)
             has_memory = True
+    display = (ident.get("email") or "").split("@")[0] or "toi"
     return web.json_response({
         "ok": True,
-        "display_name": profile["display_name"],
+        "display_name": display,
+        "admin": ident["admin"],
         "has_memory": has_memory,
     })
 
@@ -310,23 +302,23 @@ async def ask(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     message = (data.get("message") or "").strip()[:4000]
     if not message:
         return web.json_response({"error": "message vide"}, status=400)
-    if code not in _CODE_MAP:
-        return web.json_response({"error": "code invalide"}, status=401)
-    if not _check_rate(code):
+    if not _check_rate(member_id):
         return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
-    _init_services()
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
     # Outils de session : projet actif (lire/écrire, scopé membre+projet) + VPS si admin.
     session_tools = []
-    active_pid = _active_project.get(code)
+    active_pid = _active_project.get(member_id)
     if active_pid and _projects is not None:
-        session_tools += build_project_tools(_projects, _member_of(code), active_pid)
-    if _CODE_MAP.get(code, {}).get("admin") and _vps_tools:
+        session_tools += build_project_tools(_projects, member_id, active_pid)
+    if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement
     extra_tools = ToolRegistry(session_tools) if session_tools else None
     # Avec outils (web et/ou projet), un énoncé peut enchaîner plusieurs appels :
@@ -334,7 +326,7 @@ async def ask(request: web.Request) -> web.Response:
     timeout = 60.0 if (getattr(_llm, "_tools", None) or extra_tools) else 30.0
     try:
         reply = await asyncio.wait_for(
-            _llm.reply(message, session_id=code, extra_tools=extra_tools), timeout=timeout
+            _llm.reply(message, session_id=member_id, extra_tools=extra_tools), timeout=timeout
         )
     except asyncio.TimeoutError:
         return web.json_response({"error": "délai dépassé, réessaie"}, status=504)
@@ -348,21 +340,17 @@ async def session_end(request: web.Request) -> web.Response:
 
     POST /session/end  body: {code}  → {ok, saved}
     """
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    if code not in _CODE_MAP or _llm is None:
+    ident = await _identify(request)
+    if ident is None or _llm is None:
         return web.json_response({"ok": True, "saved": 0})
-    history = _llm.get_history(code)
-    _llm.unload_memory(code)
+    member_id = ident["member_id"]
+    history = _llm.get_history(member_id)
+    _llm.unload_memory(member_id)
     saved = 0
     if history and _memory:
-        profile = _CODE_MAP[code]
         try:
             saved = await _memory.extract_and_save(
-                profile["member_id"], _TENANT_ID, f"web-{code[:8]}", history
+                member_id, _TENANT_ID, f"web-{member_id[:8]}", history
             )
         except Exception as exc:
             print(f"[VindIA] extract_and_save: {exc}")
@@ -371,63 +359,65 @@ async def session_end(request: web.Request) -> web.Response:
 
 # ──────────────────────────────────────────────────────────────
 # Projets & fichiers — espaces PRIVÉS par membre (isolation stricte)
-# Le member_id découle du code d'accès : un utilisateur ne touche QUE ses projets.
+# Le member_id découle du LOGIN Supabase : un utilisateur ne touche QUE ses données.
 # ──────────────────────────────────────────────────────────────
 
-def _member_of(code: str):
-    """member_id du code d'accès, ou None si code invalide. Clé de l'isolation."""
-    profile = _CODE_MAP.get(code)
-    return profile["member_id"] if profile else None
+async def _identify(request: web.Request):
+    """Identité {member_id, email, admin} depuis le jeton Supabase, ou None si non
+    authentifié. Crée le membre en base à la volée (1er login)."""
+    _init_services()
+    if _auth is None:
+        return None
+    ident = await _auth.verify(bearer_token(request.headers.get("Authorization", "")))
+    if ident and _store is not None:
+        try:
+            _store.ensure_member(ident["member_id"], _TENANT_ID, ident.get("email") or "membre")
+        except Exception:
+            pass
+    return ident
 
 
 async def projects_list(request: web.Request) -> web.Response:
-    """POST /projects/list {code} → {projects:[{project_id,name,created_at,documents}]}"""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400)
-    member_id = _member_of((data.get("code") or "").strip())
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
-    projs = _projects.list_projects(member_id)
+    """POST /projects/list → {projects:[…]} du membre connecté."""
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    projs = _projects.list_projects(ident["member_id"])
     return web.json_response({"projects": [p.as_dict() for p in projs]})
 
 
 async def projects_create(request: web.Request) -> web.Response:
-    """POST /projects/create {code, name} → {project}"""
+    """POST /projects/create {name} → {project}"""
     try:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    member_id = _member_of((data.get("code") or "").strip())
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
     name = (data.get("name") or "").strip()[:120]
     if not name:
         return web.json_response({"error": "nom de projet vide"}, status=400)
-    _init_services()
-    proj = _projects.create_project(member_id, name)
+    proj = _projects.create_project(ident["member_id"], name)
     return web.json_response({"project": proj.as_dict()})
 
 
 async def project_file(request: web.Request) -> web.Response:
-    """POST /projects/file {code, project_id, filename} → contenu d'un fichier (pour télécharger).
+    """POST /projects/file {project_id, filename} → contenu d'un fichier (pour télécharger).
 
-    Permet à l'utilisateur de récupérer un fichier que VindIA a créé dans le projet.
-    Isolé : member_id dérivé du code, lecture confinée à l'espace du membre.
+    Récupère un fichier que VindIA a créé dans le projet. Lecture confinée à l'espace
+    du membre connecté.
     """
     try:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    member_id = _member_of((data.get("code") or "").strip())
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
     project_id = (data.get("project_id") or "").strip()
     filename = (data.get("filename") or "").strip()
-    content = _projects.read_document(member_id, project_id, filename) if _projects else ""
+    content = _projects.read_document(ident["member_id"], project_id, filename) if _projects else ""
     if not content:
         return web.json_response({"error": "fichier introuvable"}, status=404)
     return web.json_response({"filename": filename, "content": content})
@@ -442,11 +432,10 @@ async def projects_activate(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    member_id = _member_of(code)
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     project_id = (data.get("project_id") or "").strip()
     ctx = ""
     name = None
@@ -457,11 +446,11 @@ async def projects_activate(request: web.Request) -> web.Response:
         # Index LÉGER (noms seulement) : VindIA lira les fichiers à la demande.
         ctx = _projects.build_index(member_id, project_id)
         name = proj.name
-        _active_project[code] = project_id
+        _active_project[member_id] = project_id
     else:
-        _active_project.pop(code, None)
+        _active_project.pop(member_id, None)
     if _llm is not None and hasattr(_llm, "load_project"):
-        _llm.load_project(code, ctx)
+        _llm.load_project(member_id, ctx)
     return web.json_response({"ok": True, "active": name})
 
 
@@ -473,18 +462,20 @@ async def upload(request: web.Request) -> web.Response:
     les autres rangés dans l'espace privé du membre. Une seule actualisation du
     contexte LLM à la fin. Rétrocompatible avec l'envoi d'un fichier unique.
     """
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     try:
         reader = await request.multipart()
     except Exception:
         return web.json_response({"error": "multipart attendu"}, status=400)
 
-    code = project_id = None
+    project_id = None
     files: list = []          # (filename, payload)
     total = 0
     async for part in reader:
-        if part.name == "code":
-            code = (await part.text()).strip()
-        elif part.name == "project_id":
+        if part.name == "project_id":
             project_id = (await part.text()).strip()
         elif part.name == "file":
             payload = await part.read(decode=False)
@@ -497,16 +488,12 @@ async def upload(request: web.Request) -> web.Response:
             if len(files) > _MAX_FILES:
                 return web.json_response({"error": f"trop de fichiers (max {_MAX_FILES})"}, status=413)
 
-    member_id = _member_of(code or "")
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
     if not project_id:
         return web.json_response({"error": "project_id manquant"}, status=400)
     if not files:
         return web.json_response({"error": "aucun fichier"}, status=400)
-    if not _check_rate(code):
+    if not _check_rate(member_id):
         return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
-    _init_services()
     if _projects.get_project(member_id, project_id) is None:
         return web.json_response({"error": "projet inconnu"}, status=404)
 
@@ -530,8 +517,8 @@ async def upload(request: web.Request) -> web.Response:
         added.append({"filename": doc.filename, "chars": doc.chars})
 
     # Rafraîchit l'index léger (noms) si ce projet est actif pour la session.
-    if added and _active_project.get(code) == project_id and _llm is not None and hasattr(_llm, "load_project"):
-        _llm.load_project(code, _projects.build_index(member_id, project_id))
+    if added and _active_project.get(member_id) == project_id and _llm is not None and hasattr(_llm, "load_project"):
+        _llm.load_project(member_id, _projects.build_index(member_id, project_id))
     return web.json_response({"ok": True, "added": added, "skipped": skipped})
 
 
@@ -549,14 +536,10 @@ _SERVICE_CATALOG = [
 
 async def connections_list(request: web.Request) -> web.Response:
     """POST /connections/list {code} → état des connexions du membre (sans secrets)."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400)
-    member_id = _member_of((data.get("code") or "").strip())
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     connected = {}
     if _vault is not None:
         connected = {c.service: c.as_dict() for c in _vault.list_connections(member_id)}
@@ -581,13 +564,11 @@ async def connections_disconnect(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    member_id = _member_of(code)
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
     service = (data.get("service") or "").strip()
-    removed = _vault.delete(member_id, service) if _vault is not None else False
+    removed = _vault.delete(ident["member_id"], service) if _vault is not None else False
     return web.json_response({"ok": True, "removed": removed})
 
 
@@ -598,16 +579,11 @@ def _prune_oauth_states() -> None:
 
 
 async def oauth_google_start(request: web.Request) -> web.Response:
-    """POST /oauth/google/start {code} → {auth_url} vers lequel la page redirige."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    member_id = _member_of(code)
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    """POST /oauth/google/start → {auth_url} vers lequel la page redirige."""
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     if _vault is None:
         return web.json_response({"error": "coffre non configuré (VINDIA_VAULT_KEY manquante)"}, status=503)
     if _google is None or not _google.configured:
@@ -656,18 +632,13 @@ async def oauth_google_callback(request: web.Request) -> web.Response:
 # ──────────────────────────────────────────────────────────────
 
 async def memory_list(request: web.Request) -> web.Response:
-    """POST /memory/list {code} → souvenirs du membre (id + texte). Isolé par code."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400)
-    member_id = _member_of((data.get("code") or "").strip())
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    """POST /memory/list → souvenirs du membre connecté (id + texte)."""
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
     if _store is None:
         return web.json_response({"enabled": False, "memories": []})
-    return web.json_response({"enabled": True, "memories": _store.list_memories(member_id)})
+    return web.json_response({"enabled": True, "memories": _store.list_memories(ident["member_id"])})
 
 
 async def memory_forget(request: web.Request) -> web.Response:
@@ -676,17 +647,16 @@ async def memory_forget(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    code = (data.get("code") or "").strip()
-    member_id = _member_of(code)
-    if member_id is None:
-        return web.json_response({"error": "code invalide"}, status=401)
-    _init_services()
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    member_id = ident["member_id"]
     if _store is None:
         return web.json_response({"ok": True, "removed": False})
     removed = _store.delete_memory(member_id, (data.get("id") or "").strip())
     # Rafraîchit la mémoire injectée dans la session courante (le souvenir effacé disparaît).
     if removed and _llm is not None and _memory is not None:
-        _llm.load_memory(code, _memory.load_context(member_id))
+        _llm.load_memory(member_id, _memory.load_context(member_id))
     return web.json_response({"ok": True, "removed": removed})
 
 

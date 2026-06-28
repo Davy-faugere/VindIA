@@ -35,6 +35,8 @@ from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 from shared.agent.project_tools import build_project_tools
 from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
+from shared.agent.approvals import ApprovalStore, APPROVED
+from shared.agent.telegram_notify import build_telegram_notifier
 
 ROOM = os.environ.get("VINDIA_ROOM", "vindia")
 URL = os.environ["LIVEKIT_URL"]
@@ -65,6 +67,8 @@ _projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistanc
 _vault = None     # CredentialVault : coffre chiffré des connexions (Google, mail…)
 _google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés absentes)
 _vps_tools = []   # outils VPS (lecture seule) — RÉSERVÉS à l'admin, hors registre global
+_approvals = None # ApprovalStore : validation humaine des comptes (pending/approved/refused)
+_telegram = None  # TelegramNotifier : alerte l'admin d'une nouvelle inscription (ou None)
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
@@ -100,7 +104,7 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram
     if _llm is not None:
         return
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
@@ -108,6 +112,12 @@ def _init_services() -> None:
     if _SUPABASE_URL and _SUPABASE_ANON:
         _auth = SupabaseAuth(_SUPABASE_URL, _SUPABASE_ANON, _ADMIN_EMAILS)
         print(f"[VindIA] Auth Supabase configurée (admins: {len(_ADMIN_EMAILS)}).")
+    # Validation humaine des comptes : un inscrit attend l'aval de l'admin.
+    _approvals = ApprovalStore(os.path.join(_DATA_DIR, "approvals"))
+    # Notification Telegram à l'admin (nouvelle inscription) — None si non configuré.
+    _telegram = build_telegram_notifier()
+    if _telegram:
+        print("[VindIA] Notifications Telegram actives.")
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
     # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
@@ -258,6 +268,14 @@ async def auth(request: web.Request) -> web.Response:
     if ident is None:
         return web.json_response({"ok": False, "error": "non authentifié"}, status=401)
     member_id = ident["member_id"]
+    # Compte non encore validé par l'admin : on renvoie le statut (la page affiche
+    # « en attente »), sans charger la mémoire ni donner accès.
+    if not ident.get("approved"):
+        return web.json_response({
+            "ok": True, "approved": False, "status": ident.get("status"),
+            "display_name": (ident.get("email") or "").split("@")[0] or "toi",
+            "admin": False,
+        })
     has_memory = False
     if _memory and _llm:
         ctx = _memory.load_context(member_id)
@@ -267,6 +285,7 @@ async def auth(request: web.Request) -> web.Response:
     display = (ident.get("email") or "").split("@")[0] or "toi"
     return web.json_response({
         "ok": True,
+        "approved": True,
         "display_name": display,
         "admin": ident["admin"],
         "has_memory": has_memory,
@@ -302,9 +321,9 @@ async def ask(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     message = (data.get("message") or "").strip()[:4000]
     if not message:
@@ -363,25 +382,50 @@ async def session_end(request: web.Request) -> web.Response:
 # ──────────────────────────────────────────────────────────────
 
 async def _identify(request: web.Request):
-    """Identité {member_id, email, admin} depuis le jeton Supabase, ou None si non
-    authentifié. Crée le membre en base à la volée (1er login)."""
+    """Identité {member_id, email, admin, approved, status} depuis le jeton Supabase,
+    ou None si non authentifié. Crée le membre à la volée et gère la validation humaine
+    (admin auto-approuvé ; tout autre passe en « pending » + notification Telegram)."""
     _init_services()
     if _auth is None:
         return None
     ident = await _auth.verify(bearer_token(request.headers.get("Authorization", "")))
-    if ident and _store is not None:
+    if not ident:
+        return None
+    if _store is not None:
         try:
             _store.ensure_member(ident["member_id"], _TENANT_ID, ident.get("email") or "membre")
         except Exception:
             pass
+    # Validation humaine : l'admin est toujours approuvé ; les autres attendent l'aval.
+    if ident["admin"]:
+        ident["status"], ident["approved"] = APPROVED, True
+    else:
+        status, is_new = _approvals.request(ident["member_id"], ident.get("email") or "")
+        ident["status"], ident["approved"] = status, (status == APPROVED)
+        if is_new and _telegram is not None:
+            await _telegram.notify(
+                f"VindIA — nouvelle inscription en attente de validation : {ident.get('email') or ident['member_id']}"
+            )
     return ident
+
+
+async def _require_approved(request: web.Request):
+    """(identité, None) si connecté ET approuvé ; (None, réponse d'erreur) sinon."""
+    ident = await _identify(request)
+    if ident is None:
+        return None, web.json_response({"error": "non authentifié"}, status=401)
+    if not ident.get("approved"):
+        return None, web.json_response(
+            {"error": "compte en attente de validation", "status": ident.get("status")}, status=403
+        )
+    return ident, None
 
 
 async def projects_list(request: web.Request) -> web.Response:
     """POST /projects/list → {projects:[…]} du membre connecté."""
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     projs = _projects.list_projects(ident["member_id"])
     return web.json_response({"projects": [p.as_dict() for p in projs]})
 
@@ -392,9 +436,9 @@ async def projects_create(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     name = (data.get("name") or "").strip()[:120]
     if not name:
         return web.json_response({"error": "nom de projet vide"}, status=400)
@@ -412,9 +456,9 @@ async def project_file(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     project_id = (data.get("project_id") or "").strip()
     filename = (data.get("filename") or "").strip()
     content = _projects.read_document(ident["member_id"], project_id, filename) if _projects else ""
@@ -432,9 +476,9 @@ async def projects_activate(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     project_id = (data.get("project_id") or "").strip()
     ctx = ""
@@ -462,9 +506,9 @@ async def upload(request: web.Request) -> web.Response:
     les autres rangés dans l'espace privé du membre. Une seule actualisation du
     contexte LLM à la fin. Rétrocompatible avec l'envoi d'un fichier unique.
     """
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     try:
         reader = await request.multipart()
@@ -536,9 +580,9 @@ _SERVICE_CATALOG = [
 
 async def connections_list(request: web.Request) -> web.Response:
     """POST /connections/list {code} → état des connexions du membre (sans secrets)."""
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     connected = {}
     if _vault is not None:
@@ -564,9 +608,9 @@ async def connections_disconnect(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     service = (data.get("service") or "").strip()
     removed = _vault.delete(ident["member_id"], service) if _vault is not None else False
     return web.json_response({"ok": True, "removed": removed})
@@ -580,9 +624,9 @@ def _prune_oauth_states() -> None:
 
 async def oauth_google_start(request: web.Request) -> web.Response:
     """POST /oauth/google/start → {auth_url} vers lequel la page redirige."""
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     if _vault is None:
         return web.json_response({"error": "coffre non configuré (VINDIA_VAULT_KEY manquante)"}, status=503)
@@ -633,9 +677,9 @@ async def oauth_google_callback(request: web.Request) -> web.Response:
 
 async def memory_list(request: web.Request) -> web.Response:
     """POST /memory/list → souvenirs du membre connecté (id + texte)."""
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     if _store is None:
         return web.json_response({"enabled": False, "memories": []})
     return web.json_response({"enabled": True, "memories": _store.list_memories(ident["member_id"])})
@@ -647,9 +691,9 @@ async def memory_forget(request: web.Request) -> web.Response:
         data = await request.json()
     except Exception:
         return web.json_response({"error": "bad json"}, status=400)
-    ident = await _identify(request)
-    if ident is None:
-        return web.json_response({"error": "non authentifié"}, status=401)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
     member_id = ident["member_id"]
     if _store is None:
         return web.json_response({"ok": True, "removed": False})
@@ -658,6 +702,38 @@ async def memory_forget(request: web.Request) -> web.Response:
     if removed and _llm is not None and _memory is not None:
         _llm.load_memory(member_id, _memory.load_context(member_id))
     return web.json_response({"ok": True, "removed": removed})
+
+
+# ──────────────────────────────────────────────────────────────
+# Administration — validation humaine des comptes (admin uniquement)
+# ──────────────────────────────────────────────────────────────
+
+async def admin_pending(request: web.Request) -> web.Response:
+    """POST /admin/pending → liste des comptes en attente. Admin uniquement."""
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    if not ident.get("admin"):
+        return web.json_response({"error": "réservé à l'administrateur"}, status=403)
+    pending = _approvals.list_by_status("pending") if _approvals else []
+    return web.json_response({"pending": pending})
+
+
+async def admin_decide(request: web.Request) -> web.Response:
+    """POST /admin/decide {member_id, approve:bool} → valide ou refuse un compte. Admin only."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    if not ident.get("admin"):
+        return web.json_response({"error": "réservé à l'administrateur"}, status=403)
+    target = (data.get("member_id") or "").strip()
+    approve = bool(data.get("approve"))
+    ok = _approvals.decide(target, approve) if _approvals else False
+    return web.json_response({"ok": ok, "decision": "approved" if approve else "refused"})
 
 
 def build_app() -> web.Application:
@@ -679,6 +755,8 @@ def build_app() -> web.Application:
     app.router.add_post("/connections/disconnect", connections_disconnect)
     app.router.add_post("/memory/list", memory_list)
     app.router.add_post("/memory/forget", memory_forget)
+    app.router.add_post("/admin/pending", admin_pending)
+    app.router.add_post("/admin/decide", admin_decide)
     app.router.add_post("/oauth/google/start", oauth_google_start)
     app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/{name}", static_file)

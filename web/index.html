@@ -172,6 +172,7 @@
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button">Connexions</button>
+      <button id="adminBtn" class="switch" type="button" hidden>Administration</button>
       <button id="switchAccount" class="switch">Changer de compte</button>
     </div>
     <footer>VindIA — voix française naturelle</footer>
@@ -213,15 +214,37 @@
     </div>
   </div>
 
+  <div class="overlay" id="adminOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Administration — comptes en attente</span>
+        <button id="adminClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Valide ou refuse les nouveaux inscrits.</p>
+      <div id="adminList" class="conn-list"></div>
+      <p class="sheet-note" id="adminNote"></p>
+    </div>
+  </div>
+
   <div class="login" id="loginScreen" hidden>
     <form class="login-card" id="loginForm">
       <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
-      <p class="sub">Connecte-toi pour continuer</p>
+      <p class="sub" id="loginSub">Connecte-toi pour continuer</p>
       <input id="loginEmail" type="email" placeholder="Adresse e-mail" autocomplete="username" required />
       <input id="loginPass" type="password" placeholder="Mot de passe" autocomplete="current-password" required />
       <button id="loginBtn" type="submit">Se connecter</button>
       <p class="login-err" id="loginErr"></p>
+      <button id="loginToggle" type="button" class="switch" style="margin-top:6px">Pas de compte ? Créer un compte</button>
     </form>
+  </div>
+
+  <div class="login" id="pendingScreen" hidden>
+    <div class="login-card">
+      <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
+      <p class="sub">Compte en attente de validation</p>
+      <p style="font-size:14px;color:var(--muted);line-height:1.5">Ton compte a bien été créé. Un administrateur doit l'autoriser avant que tu puisses utiliser VindIA. Tu seras prévenu une fois validé.</p>
+      <button id="pendingLogout" type="button">Se déconnecter</button>
+    </div>
   </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -239,9 +262,10 @@
   const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNzdmJ4aGFxdnFjc2x4dmxqdGxiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3ODA3MTgsImV4cCI6MjA5MDM1NjcxOH0.M06Q319kRwn0J7LnU-yQtj_FifMtTNKZzTcQ2rYxZkk';
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-  const loginScreen = $('loginScreen');
-  function showLogin() { loginScreen.hidden = false; }
+  const loginScreen = $('loginScreen'), pendingScreen = $('pendingScreen');
+  function showLogin() { pendingScreen.hidden = true; loginScreen.hidden = false; }
   function hideLogin() { loginScreen.hidden = true; }
+  function showPending() { loginScreen.hidden = true; pendingScreen.hidden = false; }
 
   // Jeton d'accès courant (supabase-js gère le rafraîchissement automatiquement).
   async function authHeaders(extra) {
@@ -250,36 +274,61 @@
     return Object.assign({ 'Authorization': 'Bearer ' + t }, extra || {});
   }
 
-  let _displayName = '';
+  let _displayName = '', _isAdmin = false;
   async function resolveIdentity() {
     try {
       const r = await fetch('/auth', { method: 'POST', headers: await authHeaders() });
       if (r.status === 401) { showLogin(); return false; }
       const d = await r.json();
+      if (d.ok && d.approved === false) { showPending(); return false; }
       if (d.ok) {
         _displayName = d.display_name || '';
+        _isAdmin = !!d.admin;
+        $('adminBtn').hidden = !_isAdmin;
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
-        hideLogin();
+        hideLogin(); pendingScreen.hidden = true;
         return true;
       }
     } catch (e) { /* serveur non dispo */ }
     return false;
   }
 
-  // Login : email + mot de passe.
+  // Formulaire login / inscription (bascule via le lien).
+  let _signupMode = false;
+  $('loginToggle').addEventListener('click', () => {
+    _signupMode = !_signupMode;
+    $('loginBtn').textContent = _signupMode ? 'Créer mon compte' : 'Se connecter';
+    $('loginSub').textContent = _signupMode ? 'Crée ton compte' : 'Connecte-toi pour continuer';
+    $('loginToggle').textContent = _signupMode ? "J'ai déjà un compte" : 'Pas de compte ? Créer un compte';
+    $('loginErr').textContent = '';
+  });
+
   $('loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const email = $('loginEmail').value.trim(), pass = $('loginPass').value;
     const btn = $('loginBtn'), err = $('loginErr');
-    err.textContent = ''; btn.disabled = true; btn.textContent = 'Connexion…';
+    err.textContent = ''; btn.disabled = true; btn.textContent = '…';
     try {
-      const { error } = await sb.auth.signInWithPassword({ email, password: pass });
-      if (error) { err.textContent = 'Identifiants incorrects.'; }
-      else { $('loginPass').value = ''; await resolveIdentity(); }
-    } catch (e) { err.textContent = 'Connexion impossible, réessaie.'; }
-    finally { btn.disabled = false; btn.textContent = 'Se connecter'; }
+      if (_signupMode) {
+        const { error } = await sb.auth.signUp({ email, password: pass });
+        if (error) { err.textContent = 'Inscription impossible : ' + (error.message || ''); }
+        else {
+          err.style.color = '#15803d';
+          err.textContent = "Compte créé ! Vérifie tes e-mails pour confirmer, puis connecte-toi.";
+          _signupMode = false; $('loginSub').textContent = 'Connecte-toi pour continuer';
+          $('loginToggle').textContent = 'Pas de compte ? Créer un compte';
+        }
+      } else {
+        const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+        if (error) { err.textContent = 'Identifiants incorrects ou e-mail non confirmé.'; }
+        else { $('loginPass').value = ''; await resolveIdentity(); }
+      }
+    } catch (e) { err.textContent = 'Opération impossible, réessaie.'; }
+    finally { btn.disabled = false; btn.textContent = _signupMode ? 'Créer mon compte' : 'Se connecter'; }
   });
+
+  $('pendingLogout').addEventListener('click', async () => { await sb.auth.signOut(); showLogin(); });
 
   // Au démarrage : session existante → on entre ; sinon → écran de login.
   (async () => {
@@ -590,6 +639,41 @@
   $('filesBtn').addEventListener('click', () => { filesOverlay.hidden = false; renderProjectFiles(); });
   $('filesClose').addEventListener('click', () => { filesOverlay.hidden = true; });
   filesOverlay.addEventListener('click', (e) => { if (e.target === filesOverlay) filesOverlay.hidden = true; });
+
+  // ── Administration : valider/refuser les comptes en attente (admin uniquement) ──
+  const adminOverlay = $('adminOverlay'), adminList = $('adminList'), adminNote = $('adminNote');
+
+  async function renderAdmin() {
+    adminNote.textContent = ''; adminList.innerHTML = '';
+    try {
+      const d = await projApi('/admin/pending');
+      const items = d.pending || [];
+      if (!items.length) { adminNote.textContent = "Aucun compte en attente."; return; }
+      items.forEach(u => {
+        const row = document.createElement('div'); row.className = 'conn-row';
+        const left = document.createElement('div');
+        const name = document.createElement('div'); name.className = 'conn-name'; name.textContent = u.email || u.member_id;
+        const m = document.createElement('div'); m.className = 'conn-meta'; m.textContent = 'demandé le ' + (u.requested_at || '').slice(0, 10);
+        left.appendChild(name); left.appendChild(m);
+        const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.gap = '6px';
+        const ok = document.createElement('button'); ok.className = 'conn-btn'; ok.textContent = 'Approuver';
+        const no = document.createElement('button'); no.className = 'conn-btn off'; no.textContent = 'Refuser';
+        const decide = async (approve) => {
+          ok.disabled = no.disabled = true;
+          try { await projApi('/admin/decide', { member_id: u.member_id, approve }); await renderAdmin(); }
+          catch (e) { adminNote.textContent = e.message; ok.disabled = no.disabled = false; }
+        };
+        ok.onclick = () => decide(true); no.onclick = () => decide(false);
+        wrap.appendChild(ok); wrap.appendChild(no);
+        row.appendChild(left); row.appendChild(wrap);
+        adminList.appendChild(row);
+      });
+    } catch (e) { adminNote.textContent = e.message; }
+  }
+
+  $('adminBtn').addEventListener('click', () => { adminOverlay.hidden = false; renderAdmin(); });
+  $('adminClose').addEventListener('click', () => { adminOverlay.hidden = true; });
+  adminOverlay.addEventListener('click', (e) => { if (e.target === adminOverlay) adminOverlay.hidden = true; });
 
   // --- Synthèse vocale (voix FR du navigateur), choisie la plus naturelle ---
   let frVoice = null;

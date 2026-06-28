@@ -56,7 +56,22 @@ class SyncedToolsTest(unittest.TestCase):
 
     def test_build_synced_tools_names(self):
         tools = {t.spec.name for t in build_synced_tools("/tmp/x")}
-        self.assertEqual(tools, {"synced_list_files", "synced_read_file"})
+        self.assertEqual(tools, {"synced_list_files", "synced_read_file", "synced_write_file"})
+
+    def test_write_creates_in_creations_subfolder(self):
+        from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        with tempfile.TemporaryDirectory() as tmp:
+            out = asyncio.run(SyncedWriteTool(tmp).run({"filename": "cr.md", "content": "# Bilan\nok"}))
+            self.assertIn("cr.md", out)
+            written = Path(tmp) / _CREATIONS / "cr.md"
+            self.assertTrue(written.is_file())
+            self.assertIn("Bilan", written.read_text())
+
+    def test_write_rejects_empty(self):
+        from shared.agent.synced_tools import SyncedWriteTool
+        with tempfile.TemporaryDirectory() as tmp:
+            out = asyncio.run(SyncedWriteTool(tmp).run({"filename": "x.md", "content": "  "}))
+            self.assertIn("vide", out)
 
 
 if __name__ == "__main__":

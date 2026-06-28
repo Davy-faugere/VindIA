@@ -333,10 +333,15 @@ async def ask(request: web.Request) -> web.Response:
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
     # Outils de session : projet actif (lire/écrire, scopé membre+projet) + VPS si admin.
+    # Le projet actif vient du corps de la requête (la page l'envoie à chaque message) —
+    # robuste aux redémarrages ; à défaut, on retombe sur l'état mémoire _active_project.
     session_tools = []
-    active_pid = _active_project.get(member_id)
-    if active_pid and _projects is not None:
+    active_pid = (data.get("project_id") or "").strip() or _active_project.get(member_id)
+    if active_pid and _projects is not None and _projects.get_project(member_id, active_pid):
         session_tools += build_project_tools(_projects, member_id, active_pid)
+        # Rappelle à VindIA quels fichiers existent (index léger) pour qu'elle les lise.
+        if hasattr(_llm, "load_project"):
+            _llm.load_project(member_id, _projects.build_index(member_id, active_pid))
     if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement
     extra_tools = ToolRegistry(session_tools) if session_tools else None

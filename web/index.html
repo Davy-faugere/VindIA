@@ -430,15 +430,24 @@
         o.textContent = p.name + (p.documents && p.documents.length ? ' (' + p.documents.length + ')' : '');
         projSelect.appendChild(o);
       });
-      if (selectId) projSelect.value = selectId;
+      // Restaure le projet précédemment actif (mémorisé), sinon celui demandé.
+      const remembered = selectId || localStorage.getItem('vindia_project') || '';
+      if (remembered) projSelect.value = remembered;
+      if (projSelect.value) activateProject(projSelect.value);  // réactive côté serveur
     } catch (e) { /* serveur indispo : barre projet inerte, pas bloquant */ }
   }
 
-  projSelect.addEventListener('change', async () => {
+  async function activateProject(pid) {
+    if (pid) localStorage.setItem('vindia_project', pid); else localStorage.removeItem('vindia_project');
     try {
-      const d = await projApi('/projects/activate', { project_id: projSelect.value });
-      if (d.active) addLine('ai', 'Projet « ' + d.active + ' » activé. Je m\'appuie sur ses documents.');
+      const d = await projApi('/projects/activate', { project_id: pid });
+      return d;
     } catch (e) { errEl.textContent = e.message; }
+  }
+
+  projSelect.addEventListener('change', async () => {
+    const d = await activateProject(projSelect.value);
+    if (d && d.active) addLine('ai', 'Projet « ' + d.active + ' » activé. Je m\'appuie sur ses documents.');
   });
 
   newProjBtn.addEventListener('click', async () => {
@@ -784,7 +793,7 @@
     try {
       const r = await fetch('/ask', {
         method: 'POST', headers: await authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ message })
+        body: JSON.stringify({ message, project_id: projSelect.value || '' })
       });
       if (r.status === 401) { showLogin(); throw new Error("session expirée, reconnecte-toi"); }
       if (!r.ok) throw new Error('HTTP ' + r.status);

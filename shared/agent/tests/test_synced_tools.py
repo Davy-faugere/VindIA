@@ -78,8 +78,9 @@ class SyncedToolsTest(unittest.TestCase):
         from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
         with tempfile.TemporaryDirectory() as tmp:
             calls = {}
-            def fake_builder(name, content):
+            def fake_builder(name, content, base_dir=None):
                 calls["name"] = name
+                calls["base_dir"] = base_dir
                 return (b"PK\x03\x04 vrai-docx", "application/…")
             tool = SyncedWriteTool(tmp, office_builder=fake_builder)
             asyncio.run(tool.run({"filename": "rapport.docx", "content": "# Titre\n- point"}))

@@ -152,9 +152,10 @@ class SyncedWriteTool(Tool):
         ext = Path(filename).suffix.lower().lstrip(".")
         if ext in _OFFICE_EXT:
             # Vrai binaire bureautique (sinon le fichier serait illisible sur le PC).
+            # base_dir = le dossier synchronisé → VindIA peut insérer des images locales.
             builder = self._office_builder or _default_office_builder
             try:
-                payload, _ = builder(filename, content)
+                payload, _ = builder(filename, content, str(self._base))
             except Exception as exc:  # noqa: BLE001
                 return f"Génération du fichier impossible : {str(exc)[:160]}"
             (dest / filename).write_bytes(payload)
@@ -166,10 +167,10 @@ class SyncedWriteTool(Tool):
         )
 
 
-def _default_office_builder(name: str, content: str):  # pragma: no cover - dépend des libs Office
+def _default_office_builder(name: str, content: str, base_dir=None):  # pragma: no cover - libs Office
     from .officegen import build_file
 
-    return build_file(name, content)
+    return build_file(name, content, base_dir)
 
 
 def build_synced_tools(base_dir: str) -> List[Tool]:

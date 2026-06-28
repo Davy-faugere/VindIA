@@ -16,12 +16,30 @@ from __future__ import annotations
 import csv
 import io
 import re
+from pathlib import Path
 
 _DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 # Couleur d'accent (charte VindIA, indigo) pour les titres.
 _ACCENT = (79, 70, 229)
+
+# Images : insérées via « ![alt](nom) » si le fichier existe sous base_dir.
+_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+
+def _safe_image(base_dir, rel: str):
+    """Chemin absolu d'une image SOUS base_dir (anti path-traversal), ou None."""
+    if not base_dir:
+        return None
+    try:
+        base = Path(base_dir).resolve()
+        target = (base / rel.lstrip("/")).resolve()
+    except Exception:
+        return None
+    if (target == base or base in target.parents) and target.is_file() and target.suffix.lower() in _IMG_EXT:
+        return target
+    return None
 
 OFFICE_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -78,6 +96,11 @@ def _blocks(content: str):
                 i += 1
             yield ("table", rows)
             continue
+        img = re.match(r"^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$", line)
+        if img:
+            yield ("image", (img.group(1), img.group(2).strip()))
+            i += 1
+            continue
         if not line.strip():
             yield ("blank", None)
         elif line.startswith("### "):
@@ -99,9 +122,9 @@ def _blocks(content: str):
 #  Word
 # --------------------------------------------------------------------------- #
 
-def _build_docx(content: str) -> bytes:
+def _build_docx(content: str, base_dir=None) -> bytes:
     from docx import Document
-    from docx.shared import RGBColor
+    from docx.shared import Inches, RGBColor
 
     doc = Document()
     accent = RGBColor(*_ACCENT)
@@ -118,6 +141,16 @@ def _build_docx(content: str) -> bytes:
             _docx_runs(doc.add_paragraph(style="List Number"), data)
         elif kind == "table":
             _docx_table(doc, data)
+        elif kind == "image":
+            alt, rel = data
+            img = _safe_image(base_dir, rel)
+            if img:
+                try:
+                    doc.add_picture(str(img), width=Inches(4.0))
+                except Exception:
+                    doc.add_paragraph(f"[image : {alt or rel}]")
+            else:
+                doc.add_paragraph(f"[image introuvable : {alt or rel}]")
         else:
             _docx_runs(doc.add_paragraph(), data)
     buf = io.BytesIO()
@@ -165,7 +198,7 @@ def _sniff_rows(content: str):
     return list(csv.reader(io.StringIO(text), delimiter=delim))
 
 
-def _build_xlsx(content: str) -> bytes:
+def _build_xlsx(content: str, base_dir=None) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
@@ -187,7 +220,7 @@ def _build_xlsx(content: str) -> bytes:
     return buf.getvalue()
 
 
-def _build_pptx(content: str) -> bytes:
+def _build_pptx(content: str, base_dir=None) -> bytes:
     from pptx import Presentation
     from pptx.util import Pt
 
@@ -219,7 +252,7 @@ def _build_pptx(content: str) -> bytes:
 #  PDF
 # --------------------------------------------------------------------------- #
 
-def _build_pdf(content: str) -> bytes:
+def _build_pdf(content: str, base_dir=None) -> bytes:
     from fpdf import FPDF
 
     pdf = FPDF(format="A4")
@@ -245,6 +278,17 @@ def _build_pdf(content: str) -> bytes:
             _pdf_line(pdf, data, prefix="  ")
         elif kind == "table":
             _pdf_table(pdf, data)
+        elif kind == "image":
+            alt, rel = data
+            img = _safe_image(base_dir, rel)
+            if img:
+                try:
+                    pdf.image(str(img), w=min(90, pdf.epw))
+                    pdf.ln(3)
+                except Exception:
+                    _pdf_line(pdf, f"[image : {alt or rel}]")
+            else:
+                _pdf_line(pdf, f"[image introuvable : {alt or rel}]")
         else:
             _pdf_line(pdf, data)
     return bytes(pdf.output())
@@ -281,9 +325,11 @@ _BUILDERS = {
 }
 
 
-def build_file(name: str, content: str) -> tuple[bytes, str]:
-    """Construit le fichier binaire. Lève ValueError si l'extension n'est pas gérée."""
+def build_file(name: str, content: str, base_dir=None) -> tuple[bytes, str]:
+    """Construit le fichier binaire. `base_dir` permet d'insérer des images locales
+    (« ![alt](nom) ») trouvées sous ce dossier. Lève ValueError si l'extension n'est
+    pas gérée."""
     ext = (name.rsplit(".", 1)[-1] if "." in name else "").lower()
     if ext not in _BUILDERS:
         raise ValueError(f"format non supporte: {ext}")
-    return _BUILDERS[ext](content or ""), OFFICE_TYPES[ext]
+    return _BUILDERS[ext](content or "", base_dir), OFFICE_TYPES[ext]

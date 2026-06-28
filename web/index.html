@@ -395,6 +395,7 @@
       }
     }
     const mimes = { md:'text/markdown', csv:'text/csv', json:'application/json',
+      html:'text/html', htm:'text/html', css:'text/css', js:'text/javascript',
       sh:'text/x-shellscript', bash:'text/x-shellscript', txt:'text/plain', yml:'text/yaml', yaml:'text/yaml' };
     const blob = new Blob([content], { type: (mimes[ext] || 'text/plain') + ';charset=utf-8' });
     addDownloadButton(name, blob);

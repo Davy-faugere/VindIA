@@ -157,10 +157,8 @@
       </select>
       <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
       <button id="attachBtn" type="button" title="Ajouter des fichiers de référence">Importer</button>
-      <button id="folderBtn" type="button" title="Ajouter un dossier de référence">Dossier</button>
       <input id="fileInput" type="file" hidden multiple
              accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
-      <input id="folderInput" type="file" hidden webkitdirectory />
     </div>
 
     <div class="typebar">
@@ -171,7 +169,7 @@
     <div class="actions">
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
-      <button id="connectionsBtn" class="switch" type="button">Connexions</button>
+      <button id="connectionsBtn" class="switch" type="button" hidden>Connexions</button>
       <button id="adminBtn" class="switch" type="button" hidden>Administration</button>
       <button id="switchAccount" class="switch">Changer de compte</button>
     </div>
@@ -285,6 +283,10 @@
         _displayName = d.display_name || '';
         _isAdmin = !!d.admin;
         $('adminBtn').hidden = !_isAdmin;
+        // Admin : pas de Projets (il utilise son dossier PC synchronisé). Les autres
+        // utilisateurs gardent les projets (ils n'ont pas de synchro).
+        $('projbar').hidden = _isAdmin;
+        $('filesBtn').hidden = _isAdmin;
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
         hideLogin(); pendingScreen.hidden = true;
@@ -460,9 +462,7 @@
     } catch (e) { errEl.textContent = e.message; }
   });
 
-  const folderBtn = $('folderBtn'), folderInput = $('folderInput');
-  // Extensions ingérables (mêmes que le serveur) : on filtre côté client pour
-  // ne pas envoyer le contenu inutile d'un dossier (images, binaires…).
+  // Extensions ingérables (mêmes que le serveur).
   const OK_EXT = ['txt','md','markdown','csv','tsv','log','json','yaml','yml','html','htm','docx','xlsx','pptx','pdf'];
   const extOf = (n) => (n.split('.').pop() || '').toLowerCase();
 
@@ -475,7 +475,7 @@
     const fd = new FormData();
     fd.append('project_id', projSelect.value);
     kept.forEach(f => fd.append('file', f, f.name));
-    attachBtn.disabled = true; folderBtn.disabled = true;
+    attachBtn.disabled = true;
     const prev = attachBtn.textContent; attachBtn.textContent = '… ' + kept.length;
     try {
       const r = await fetch('/upload', { method: 'POST', headers: await authHeaders(), body: fd });
@@ -489,8 +489,8 @@
     } catch (e) {
       errEl.textContent = 'Échec de l\'ajout : ' + e.message;
     } finally {
-      attachBtn.textContent = prev; attachBtn.disabled = false; folderBtn.disabled = false;
-      fileInput.value = ''; folderInput.value = '';
+      attachBtn.textContent = prev; attachBtn.disabled = false;
+      fileInput.value = '';
     }
   }
 
@@ -498,12 +498,7 @@
     if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
     errEl.textContent = ''; fileInput.click();
   });
-  folderBtn.addEventListener('click', () => {
-    if (!projSelect.value) { errEl.textContent = "Choisis ou crée d'abord un projet."; return; }
-    errEl.textContent = ''; folderInput.click();
-  });
   fileInput.addEventListener('change', () => uploadFiles(fileInput.files));
-  folderInput.addEventListener('change', () => uploadFiles(folderInput.files));
 
   // Glisser-déposer (PC) : déposer des fichiers sur la carte les joint au projet actif.
   const card = document.querySelector('.card');

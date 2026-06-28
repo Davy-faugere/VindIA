@@ -98,7 +98,13 @@ def _extract_docx(data: bytes) -> str:  # pragma: no cover - dépend de python-d
     from docx import Document
 
     doc = Document(io.BytesIO(data))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip()).strip()
+    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:  # inclut aussi le contenu des tableaux
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n".join(parts).strip()
 
 
 def _extract_xlsx(data: bytes) -> str:  # pragma: no cover - dépend d'openpyxl

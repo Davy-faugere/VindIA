@@ -1,15 +1,14 @@
-"""Génération de fichiers bureautiques pour VindIA.
+"""Génération de fichiers bureautiques pour VindIA (Word, Excel, PowerPoint, PDF).
 
-VindIA (côté n8n) ne sait produire que du texte. Elle renvoie son contenu dans
-le marqueur [[FICHIER:nom.ext]] ... [[/FICHIER]]. Pour les formats binaires
-(Word, Excel, PowerPoint, PDF), la page poste ce contenu ici et reçoit le vrai
-fichier. Aucun stockage : on construit en mémoire et on renvoie les octets.
+VindIA produit du texte structuré (markdown) entre [[FICHIER:nom.ext]] ; ce module le
+convertit en VRAI binaire. Aucun stockage : construit en mémoire, renvoie les octets.
 
-Conventions de contenu attendues de VindIA :
-  - .docx / .pdf : markdown simple (# titres, - puces, paragraphes)
-  - .xlsx        : CSV (séparateur , ; ou tabulation, auto-détecté)
-  - .pptx        : diapositives séparées par une ligne contenant seulement ---
-                   (1re ligne de chaque diapo = titre, le reste = puces)
+Mise en page gérée :
+  - Titres « # / ## / ### » (colorés à la charte), paragraphes
+  - Puces « - » et listes numérotées « 1. »
+  - GRAS « **texte** » conservé (Word et PDF)
+  - TABLEAUX markdown «| col | col |» avec ligne de séparation «|---|---|» (Word et PDF)
+  - .xlsx = CSV → feuille ; .pptx = diapos séparées par «---»
 """
 
 from __future__ import annotations
@@ -21,7 +20,9 @@ import re
 _DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-# Extensions binaires prises en charge -> content-type
+# Couleur d'accent (charte VindIA, indigo) pour les titres.
+_ACCENT = (79, 70, 229)
+
 OFFICE_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -30,38 +31,125 @@ OFFICE_TYPES = {
 }
 
 
+# --------------------------------------------------------------------------- #
+#  Analyse du markdown (segments gras, blocs, tableaux)
+# --------------------------------------------------------------------------- #
+
+def _inline_segments(text: str):
+    """Découpe une ligne en segments (texte, gras) en gérant **gras** et `code`."""
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    segs = []
+    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
+        if part != "":
+            segs.append((part, i % 2 == 1))  # parties impaires = entre ** = gras
+    return segs or [(text, False)]
+
+
 def _strip_inline(text: str) -> str:
-    """Retire le gras/italique/`code` markdown inline."""
+    """Texte plat : retire le gras/italique/`code` (pour titres, cellules de tableau)."""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"`(.+?)`", r"\1", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text)
     return text
 
 
+def _is_table_sep(line: str) -> bool:
+    """Ligne de séparation d'un tableau markdown, ex « |---|:--:|--- »."""
+    s = line.strip()
+    return "|" in s and "-" in s and bool(re.match(r"^\|?[\s:|-]+\|?$", s))
+
+
+def _table_row(line: str):
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _blocks(content: str):
+    """Itère les blocs : ('h1'|'h2'|'h3'|'bullet'|'num'|'para'|'table'|'blank', data)."""
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        # Tableau : une ligne avec « | » suivie d'une ligne de séparation.
+        if "|" in line and line.strip() and i + 1 < len(lines) and _is_table_sep(lines[i + 1]):
+            rows = [_table_row(line)]
+            i += 2
+            while i < len(lines) and "|" in lines[i] and lines[i].strip():
+                rows.append(_table_row(lines[i]))
+                i += 1
+            yield ("table", rows)
+            continue
+        if not line.strip():
+            yield ("blank", None)
+        elif line.startswith("### "):
+            yield ("h3", line[4:].strip())
+        elif line.startswith("## "):
+            yield ("h2", line[3:].strip())
+        elif line.startswith("# "):
+            yield ("h1", line[2:].strip())
+        elif re.match(r"^\s*[-*]\s+", line):
+            yield ("bullet", re.sub(r"^\s*[-*]\s+", "", line))
+        elif re.match(r"^\s*\d+[.)]\s+", line):
+            yield ("num", re.sub(r"^\s*\d+[.)]\s+", "", line))
+        else:
+            yield ("para", line)
+        i += 1
+
+
+# --------------------------------------------------------------------------- #
+#  Word
+# --------------------------------------------------------------------------- #
+
 def _build_docx(content: str) -> bytes:
     from docx import Document
+    from docx.shared import RGBColor
 
     doc = Document()
-    for raw in content.splitlines():
-        line = raw.rstrip()
-        if not line.strip():
+    accent = RGBColor(*_ACCENT)
+    for kind, data in _blocks(content):
+        if kind == "blank":
             continue
-        if line.startswith("### "):
-            doc.add_heading(_strip_inline(line[4:].strip()), level=3)
-        elif line.startswith("## "):
-            doc.add_heading(_strip_inline(line[3:].strip()), level=2)
-        elif line.startswith("# "):
-            doc.add_heading(_strip_inline(line[2:].strip()), level=1)
-        elif re.match(r"^\s*[-*]\s+", line):
-            doc.add_paragraph(_strip_inline(re.sub(r"^\s*[-*]\s+", "", line)), style="List Bullet")
-        elif re.match(r"^\s*\d+[.)]\s+", line):
-            doc.add_paragraph(_strip_inline(re.sub(r"^\s*\d+[.)]\s+", "", line)), style="List Number")
+        if kind in ("h1", "h2", "h3"):
+            h = doc.add_heading(level=int(kind[1]))
+            run = h.add_run(_strip_inline(data))
+            run.font.color.rgb = accent
+        elif kind == "bullet":
+            _docx_runs(doc.add_paragraph(style="List Bullet"), data)
+        elif kind == "num":
+            _docx_runs(doc.add_paragraph(style="List Number"), data)
+        elif kind == "table":
+            _docx_table(doc, data)
         else:
-            doc.add_paragraph(_strip_inline(line))
+            _docx_runs(doc.add_paragraph(), data)
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
+
+def _docx_runs(paragraph, text: str) -> None:
+    for seg, bold in _inline_segments(text):
+        run = paragraph.add_run(seg)
+        run.bold = bold
+
+
+def _docx_table(doc, rows) -> None:
+    ncols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=ncols)
+    try:
+        table.style = "Light Grid Accent 1"
+    except Exception:
+        table.style = "Table Grid"
+    for ri, row in enumerate(rows):
+        for ci in range(ncols):
+            val = row[ci] if ci < len(row) else ""
+            cell = table.rows[ri].cells[ci]
+            run = cell.paragraphs[0].add_run(_strip_inline(val))
+            if ri == 0:
+                run.bold = True
+
+
+# --------------------------------------------------------------------------- #
+#  Excel / PowerPoint
+# --------------------------------------------------------------------------- #
 
 def _sniff_rows(content: str):
     text = content.strip("\n")
@@ -90,7 +178,6 @@ def _build_xlsx(content: str) -> bytes:
             cell = ws.cell(row=r, column=c, value=val)
             if r == 1:
                 cell.font = Font(bold=True)
-    # Largeur de colonne approximative
     if rows:
         for c in range(1, max(len(r) for r in rows) + 1):
             width = max((len(str(row[c - 1])) for row in rows if len(row) >= c), default=10)
@@ -105,16 +192,15 @@ def _build_pptx(content: str) -> bytes:
     from pptx.util import Pt
 
     prs = Presentation()
-    blank_title = prs.slide_layouts[1]  # Titre + contenu
+    layout = prs.slide_layouts[1]
     chunks = re.split(r"(?m)^\s*---\s*$", content)
     chunks = [c for c in chunks if c.strip()] or [content]
     for chunk in chunks:
         lines = [l.rstrip() for l in chunk.splitlines() if l.strip()]
         if not lines:
             continue
-        slide = prs.slides.add_slide(blank_title)
-        title = _strip_inline(re.sub(r"^#+\s*", "", lines[0]))
-        slide.shapes.title.text = title
+        slide = prs.slides.add_slide(layout)
+        slide.shapes.title.text = _strip_inline(re.sub(r"^#+\s*", "", lines[0]))
         body = slide.placeholders[1].text_frame
         body.clear()
         first = True
@@ -129,6 +215,10 @@ def _build_pptx(content: str) -> bytes:
     return buf.getvalue()
 
 
+# --------------------------------------------------------------------------- #
+#  PDF
+# --------------------------------------------------------------------------- #
+
 def _build_pdf(content: str) -> bytes:
     from fpdf import FPDF
 
@@ -137,29 +227,50 @@ def _build_pdf(content: str) -> bytes:
     pdf.add_page()
     pdf.add_font("DejaVu", "", _DEJAVU)
     pdf.add_font("DejaVu", "B", _DEJAVU_BOLD)
+    pdf.set_font("DejaVu", "", 11)
 
-    def cell(text: str, size: int, height: float, bold: bool = False) -> None:
-        pdf.set_font("DejaVu", "B" if bold else "", size)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(pdf.epw, height, text, new_x="LMARGIN", new_y="NEXT")
-
-    for raw in content.splitlines():
-        line = raw.rstrip()
-        if not line.strip():
+    for kind, data in _blocks(content):
+        if kind == "blank":
             pdf.ln(3)
-            continue
-        if line.startswith("# "):
-            cell(_strip_inline(line[2:].strip()), 18, 9, bold=True)
-        elif line.startswith("## "):
-            cell(_strip_inline(line[3:].strip()), 15, 8, bold=True)
-        elif line.startswith("### "):
-            cell(_strip_inline(line[4:].strip()), 13, 7, bold=True)
-        elif re.match(r"^\s*[-*]\s+", line):
-            cell("  •  " + _strip_inline(re.sub(r"^\s*[-*]\s+", "", line)), 11, 6)
+        elif kind in ("h1", "h2", "h3"):
+            size = {"h1": 18, "h2": 15, "h3": 13}[kind]
+            pdf.set_text_color(*_ACCENT)
+            pdf.set_font("DejaVu", "B", size)
+            pdf.multi_cell(pdf.epw, size * 0.5, _strip_inline(data), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(1)
+        elif kind == "bullet":
+            _pdf_line(pdf, data, prefix="  •  ")
+        elif kind == "num":
+            _pdf_line(pdf, data, prefix="  ")
+        elif kind == "table":
+            _pdf_table(pdf, data)
         else:
-            cell(_strip_inline(line), 11, 6)
-    out = pdf.output()
-    return bytes(out)
+            _pdf_line(pdf, data)
+    return bytes(pdf.output())
+
+
+def _pdf_line(pdf, text: str, prefix: str = "") -> None:
+    """Écrit une ligne avec gras inline (write gère le retour à la ligne)."""
+    pdf.set_x(pdf.l_margin)
+    if prefix:
+        pdf.set_font("DejaVu", "", 11)
+        pdf.write(6, prefix)
+    for seg, bold in _inline_segments(text):
+        pdf.set_font("DejaVu", "B" if bold else "", 11)
+        pdf.write(6, seg)
+    pdf.ln(8)
+
+
+def _pdf_table(pdf, rows) -> None:
+    pdf.set_font("DejaVu", "", 10)
+    with pdf.table() as table:
+        for row in rows:
+            tr = table.row()
+            for cell in row:
+                tr.cell(_strip_inline(cell))
+    pdf.set_font("DejaVu", "", 11)
+    pdf.ln(2)
 
 
 _BUILDERS = {

@@ -73,6 +73,26 @@ class SyncedToolsTest(unittest.TestCase):
             out = asyncio.run(SyncedWriteTool(tmp).run({"filename": "x.md", "content": "  "}))
             self.assertIn("vide", out)
 
+    def test_write_office_uses_binary_builder(self):
+        # .docx → vrai binaire via le générateur (pas le markdown brut).
+        from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = {}
+            def fake_builder(name, content):
+                calls["name"] = name
+                return (b"PK\x03\x04 vrai-docx", "application/…")
+            tool = SyncedWriteTool(tmp, office_builder=fake_builder)
+            asyncio.run(tool.run({"filename": "rapport.docx", "content": "# Titre\n- point"}))
+            written = (Path(tmp) / _CREATIONS / "rapport.docx").read_bytes()
+            self.assertEqual(calls["name"], "rapport.docx")
+            self.assertTrue(written.startswith(b"PK"))  # binaire, pas du markdown
+
+    def test_write_text_stays_text(self):
+        from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(SyncedWriteTool(tmp).run({"filename": "note.md", "content": "# Salut"}))
+            self.assertEqual((Path(tmp) / _CREATIONS / "note.md").read_text(), "# Salut")
+
 
 if __name__ == "__main__":
     unittest.main()

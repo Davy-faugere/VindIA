@@ -28,7 +28,7 @@ from aiohttp import web
 from livekit import api
 import edge_tts
 
-from filegen import build_file, OFFICE_TYPES
+from shared.agent.officegen import build_file, OFFICE_TYPES
 from shared.agent.projects import ProjectStore, extract_text, ExtractionError
 from shared.agent.vault import CredentialVault, fernet_crypto
 from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response

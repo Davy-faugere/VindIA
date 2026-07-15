@@ -1,0 +1,3 @@
+# Les scripts batch Windows doivent garder leurs fins de ligne CRLF telles quelles
+*.cmd -text
+*.bat -text

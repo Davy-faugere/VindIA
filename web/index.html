@@ -955,6 +955,13 @@
   const SILENCE_MS = 2500;   // silence requis avant de proposer l'envoi (généreux : ne coupe pas aux pauses)
   const CONFIRM_MS = 4500;   // fenêtre pour annuler/corriger avant l'envoi automatique
   let recog = null, finalBuf = '', silenceTimer = null, confirmTimer = null, phase = 'idle';
+  // Segments définitifs de la session de reconnaissance EN COURS, indexés par leur
+  // position. Sur mobile le navigateur coupe et relance sans cesse la reconnaissance :
+  // les index repartent alors à zéro. Indexer (au lieu d'empiler) évite que les mêmes
+  // mots soient ré-ajoutés à chaque relance — c'était la cause des répétitions.
+  let segs = {};
+  const segsText = () => Object.keys(segs).map(Number).sort((a, b) => a - b)
+                          .map(k => segs[k]).join(' ').trim();
   pending.style.setProperty('--confirm', CONFIRM_MS + 'ms');
 
   const clearTimers = () => { clearTimeout(silenceTimer); clearTimeout(confirmTimer); silenceTimer = confirmTimer = null; };
@@ -962,7 +969,7 @@
 
   function startListening() {
     if (!recog || !conversing) return;
-    phase = 'listening'; finalBuf = ''; clearTimers(); hidePending();
+    phase = 'listening'; finalBuf = ''; segs = {}; clearTimers(); hidePending();
     try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
     try { recog.start(); } catch (e) { /* déjà lancé */ }
     setState('listening', '<span class="live">À l\'écoute…</span>');
@@ -973,7 +980,9 @@
   function armSilence() {
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => {
-      if (finalBuf.trim()) enterConfirm(finalBuf.trim());
+      // Phrase complète = ce qui est figé + la session en cours.
+      const txt = [finalBuf, segsText()].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+      if (txt) enterConfirm(txt);
     }, SILENCE_MS);
   }
 
@@ -1010,18 +1019,28 @@
       let interim = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
-        if (res.isFinal) finalBuf += res[0].transcript + ' ';
+        // Écrase l'entrée de cet index (pas de +=) : si le moteur ré-émet le même
+        // segment, il remplace au lieu de s'ajouter une seconde fois.
+        if (res.isFinal) segs[i] = res[0].transcript.trim();
         else interim += res[0].transcript;
       }
       pending.classList.add('show');
-      pendingText.textContent = (finalBuf + interim).trim();
+      pendingText.textContent = [finalBuf, segsText(), interim]
+        .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
       armSilence();
     };
     recog.onerror = (ev) => {
       if (ev.error !== 'no-speech' && ev.error !== 'aborted') errEl.textContent = "Micro : " + ev.error;
     };
     // Le navigateur arrête parfois l'écoute tout seul → on relance tant qu'on écoute
-    recog.onend = () => { if (conversing && phase === 'listening') { try { recog.start(); } catch (e) {} } };
+    recog.onend = () => {
+      // Fin de session (fréquent sur mobile) : on fige ce qui a été reconnu, puis on
+      // repart avec des index remis à zéro — sans quoi les segments se dupliquaient.
+      const cur = segsText();
+      if (cur) finalBuf = (finalBuf + ' ' + cur).replace(/\s+/g, ' ').trim();
+      segs = {};
+      if (conversing && phase === 'listening') { try { recog.start(); } catch (e) {} }
+    };
   } else {
     hint.textContent = "Reconnaissance vocale non dispo sur ce navigateur — utilise la saisie texte ci-dessous.";
   }

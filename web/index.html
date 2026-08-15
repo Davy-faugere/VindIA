@@ -17,8 +17,11 @@
     --font:'Inter','Inter Variable',system-ui,-apple-system,sans-serif;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%}
+  html{height:100%}
+  /* min-height et non height : avec un contenu plus haut que la fenêtre, un flex
+     centré rogne le HAUT de la carte (titre inaccessible, même en scrollant). */
   body{
+    margin:0; min-height:100%;
     font-family:var(--font); color:var(--text);
     background:radial-gradient(1200px 700px at 50% -10%, var(--soft), var(--bg) 60%);
     display:flex; align-items:center; justify-content:center; padding:24px;
@@ -28,6 +31,14 @@
     width:100%; max-width:440px; text-align:center; background:#fff;
     border:1px solid #ececf6; border-radius:var(--radius);
     box-shadow:0 20px 50px rgba(79,70,229,.10); padding:32px 24px 28px;
+  }
+  /* Application de bureau / grand écran : la carte respire au lieu de laisser
+     les deux tiers de la fenêtre vides, et la barre d'actions tient sur une ligne. */
+  @media(min-width:720px){
+    .card{max-width:560px; padding:36px 34px 30px}
+  }
+  @media(min-width:980px){
+    .card{max-width:640px}   /* fenêtre de l'application de bureau */
   }
   .brand{display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:4px}
   .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}
@@ -78,15 +89,23 @@
   .dl{display:inline-block; margin-top:4px; padding:9px 14px; background:var(--primary); color:#fff;
     border-radius:10px; text-decoration:none; font-weight:600; font-size:13.5px}
   .dl:active{background:var(--primary-hover)}
-  .switch{margin-top:16px; background:none; border:none; color:var(--muted); font:inherit;
-    font-size:12.5px; text-decoration:underline; cursor:pointer}
-  .actions{display:flex; gap:18px; justify-content:center}
+  /* Barre d'actions : chaque libellé reste sur UNE ligne (nowrap) et la barre passe
+     à la ligne suivante si la largeur manque — sans quoi « Cours d'anglais » ou
+     « Se déconnecter » se coupent en deux au milieu du mot. */
+  .switch{background:none; border:none; color:var(--muted); font:inherit; font-size:12.5px;
+    white-space:nowrap; padding:6px 8px; border-radius:8px; cursor:pointer;
+    text-decoration:none; transition:color .15s, background .15s}
+  .switch:hover{color:var(--primary); background:var(--soft)}
+  .switch[hidden]{display:none}
+  .actions{display:flex; flex-wrap:wrap; gap:2px 6px; justify-content:center;
+    margin-top:20px; padding-top:16px; border-top:1px solid #f1f1f8}
   .overlay{position:fixed; inset:0; background:rgba(17,24,39,.45); display:flex;
     align-items:flex-end; justify-content:center; z-index:50}
   .overlay[hidden]{display:none}
   .sheet{background:#fff; width:100%; max-width:440px; border-radius:18px 18px 0 0;
     padding:20px 18px 26px; box-shadow:0 -8px 30px rgba(0,0,0,.18)}
   @media(min-width:480px){.overlay{align-items:center} .sheet{border-radius:18px}}
+  @media(min-width:720px){.sheet{max-width:560px}}   /* même largeur que la carte */
   .sheet-head{display:flex; justify-content:space-between; align-items:center; font-weight:700; font-size:16px}
   .sheet-x{background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer}
   .sheet-sub{color:var(--muted); font-size:13px; margin:8px 0 14px}

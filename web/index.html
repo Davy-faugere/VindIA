@@ -32,24 +32,23 @@
     border:1px solid #ececf6; border-radius:var(--radius);
     box-shadow:0 20px 50px rgba(79,70,229,.10); padding:32px 24px 28px;
   }
-  /* Application de bureau / grand écran : la carte respire au lieu de laisser
-     les deux tiers de la fenêtre vides, et la barre d'actions tient sur une ligne. */
-  @media(min-width:720px){
-    .card{max-width:560px; padding:36px 34px 30px}
-  }
-  /* Application de bureau : la page n'est plus une carte flottante posée sur un fond,
-     elle OCCUPE la fenêtre — sinon on voit une vignette au milieu du vide, et les
-     48px de padding du body suffisent à déclencher une barre de défilement.
-     Le contenu, lui, reste borné à une largeur de lecture confortable. */
-  @media(min-width:980px){
+  /* UN SEUL basculement, dès la fin du mobile : au-delà, la page occupe la fenêtre
+     et le contenu est borné à 620px. Conséquence voulue — redimensionner la fenêtre
+     ne change plus RIEN : ni vide qui réapparaît, ni boutons qui se replacent.
+     Des paliers intermédiaires (560px, 640px…) rejoueraient exactement ce défaut. */
+  @media(min-width:640px){
     body{padding:0; align-items:stretch}
     .card{
       max-width:none; width:100%; min-height:100vh;
       border:none; border-radius:0; box-shadow:none; padding:24px 32px;
       display:flex; flex-direction:column; align-items:center; justify-content:center;
     }
+    /* 560px et non 620 : cette largeur est DÉJÀ atteinte au seuil (560 + 2×32 = 624
+       < 640), donc la zone de contenu ne varie plus jamais ensuite. À 620px elle
+       aurait continué de grandir de 640 à 684px de fenêtre — et la barre d'actions
+       s'y réorganisait (5+2 puis 6+1). C'est cette plage qui décalait les boutons. */
     .card > .transcript, .card > .projbar, .card > .typebar, .card > .actions{
-      width:100%; max-width:620px;
+      width:100%; max-width:560px;
     }
     /* Le transcript est la SEULE zone qui défile : l'orbe et la saisie restent en vue. */
     .transcript{max-height:min(280px, 30vh)}
@@ -119,7 +118,7 @@
   .sheet{background:#fff; width:100%; max-width:440px; border-radius:18px 18px 0 0;
     padding:20px 18px 26px; box-shadow:0 -8px 30px rgba(0,0,0,.18)}
   @media(min-width:480px){.overlay{align-items:center} .sheet{border-radius:18px}}
-  @media(min-width:720px){.sheet{max-width:560px}}   /* même largeur que la carte */
+  @media(min-width:640px){.sheet{max-width:560px}}   /* même seuil que le reste */
   .sheet-head{display:flex; justify-content:space-between; align-items:center; font-weight:700; font-size:16px}
   .sheet-x{background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer}
   .sheet-sub{color:var(--muted); font-size:13px; margin:8px 0 14px}

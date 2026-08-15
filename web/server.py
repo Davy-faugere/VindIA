@@ -39,6 +39,7 @@ from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+from shared.agent.sync_store import SyncStore
 from shared.agent.synced_tools import build_synced_tools
 from shared.agent.transcribe_tools import build_transcribe_tool
 
@@ -74,6 +75,7 @@ _vps_tools = []   # outils VPS (lecture seule) — RÉSERVÉS à l'admin, hors r
 _approvals = None # ApprovalStore : validation humaine des comptes (pending/approved/refused)
 _telegram = None  # TelegramNotifier : alerte l'admin d'une nouvelle inscription (ou None)
 _email = None     # EmailNotifier : même alerte par e-mail (ou None si SMTP non configuré)
+_sync = None      # SyncStore : espaces de travail synchronisés avec l'application de bureau
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
@@ -109,7 +111,7 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync
     if _llm is not None:
         return
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
@@ -126,6 +128,8 @@ def _init_services() -> None:
     _email = build_email_notifier()
     if _email:
         print("[VindIA] Alertes e-mail actives (nouvelles inscriptions).")
+    # Espaces de travail synchronisés avec l'application de bureau.
+    _sync = SyncStore(os.path.join(_DATA_DIR, "workspaces"))
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
     # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
@@ -773,6 +777,100 @@ async def admin_decide(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok, "decision": "approved" if approve else "refused"})
 
 
+
+# ──────────────────────────────────────────────────────────────
+# Synchronisation avec l'application de bureau
+# L'app envoie les fichiers des dossiers choisis par l'utilisateur et récupère les
+# créations de VindIA. Comparaison par empreinte : seul ce qui a changé transite.
+# ──────────────────────────────────────────────────────────────
+
+async def sync_workspaces(request: web.Request) -> web.Response:
+    """POST /sync/workspaces → espaces de travail du membre connecté."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    return web.json_response({"workspaces": _sync.list_workspaces(ident["member_id"])})
+
+
+async def sync_register(request: web.Request) -> web.Response:
+    """POST /sync/register {workspace, label} → déclare un dossier de travail."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    label = (data.get("label") or data.get("workspace") or "").strip()[:120]
+    if not label:
+        return web.json_response({"error": "nom de dossier manquant"}, status=400)
+    ws = _sync.register_workspace(ident["member_id"], data.get("workspace") or label, label)
+    return web.json_response({"ok": True, "workspace": ws, "label": label})
+
+
+async def sync_index(request: web.Request) -> web.Response:
+    """POST /sync/index {workspace} → empreinte de chaque fichier côté serveur.
+
+    L'application compare avec son propre relevé pour n'envoyer que les différences.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    ws = (data.get("workspace") or "").strip()
+    if not ws:
+        return web.json_response({"error": "workspace manquant"}, status=400)
+    return web.json_response({"files": _sync.index(ident["member_id"], ws)})
+
+
+async def sync_push(request: web.Request) -> web.Response:
+    """POST /sync/push (multipart: workspace, path, file) → dépose un fichier."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return web.json_response({"error": "multipart attendu"}, status=400)
+    workspace = rel = None
+    payload = b""
+    async for part in reader:
+        if part.name == "workspace":
+            workspace = (await part.text()).strip()
+        elif part.name == "path":
+            rel = (await part.text()).strip()
+        elif part.name == "file":
+            payload = await part.read(decode=False)
+            if len(payload) > _MAX_UPLOAD:
+                return web.json_response({"error": "fichier trop volumineux (max 10 Mo)"}, status=413)
+    if not workspace or not rel:
+        return web.json_response({"error": "workspace ou chemin manquant"}, status=400)
+    if not _check_rate(ident["member_id"]):
+        return web.json_response({"error": "trop de requêtes"}, status=429)
+    if not _sync.put(ident["member_id"], workspace, rel, payload):
+        return web.json_response({"error": "chemin refusé"}, status=400)
+    return web.json_response({"ok": True, "path": rel, "size": len(payload)})
+
+
+async def sync_pull(request: web.Request) -> web.Response:
+    """POST /sync/pull {workspace, path} → renvoie un fichier (créations de VindIA)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    content = _sync.get(ident["member_id"], (data.get("workspace") or "").strip(),
+                        (data.get("path") or "").strip())
+    if content is None:
+        return web.json_response({"error": "fichier introuvable"}, status=404)
+    return web.Response(body=content, content_type="application/octet-stream")
+
+
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
@@ -788,6 +886,11 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/upload", upload)
+    app.router.add_post("/sync/workspaces", sync_workspaces)
+    app.router.add_post("/sync/register", sync_register)
+    app.router.add_post("/sync/index", sync_index)
+    app.router.add_post("/sync/push", sync_push)
+    app.router.add_post("/sync/pull", sync_pull)
     app.router.add_post("/connections/list", connections_list)
     app.router.add_post("/connections/disconnect", connections_disconnect)
     app.router.add_post("/memory/list", memory_list)

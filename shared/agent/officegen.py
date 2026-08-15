@@ -32,6 +32,37 @@ _IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 AI_NOTICE = "Document généré par intelligence artificielle (VindIA) — à vérifier avant usage."
 AI_META = "AI-generated content (VindIA) — EU AI Act art. 50"
 
+# Provenance XMP pour les PDF. L'AI Act est neutre technologiquement : il exige un
+# marquage lisible par machine, et cite les « métadonnées d'identification » — ce que
+# fournit XMP, sans imposer la signature cryptographique d'un C2PA complet.
+# Les champs suivent les vocabulaires standards (Dublin Core, XMP Rights, PDF/A extension)
+# pour rester exploitables par un outil d'analyse tiers.
+def _xmp_provenance() -> str:
+    # NB : ne PAS inclure l'enveloppe <?xpacket…?> — fpdf2 l'ajoute lui-même et
+    # refuse (ValueError) un XMP déjà enveloppé.
+    return (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/"'
+        ' xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/"'
+        ' xmlns:xmp="http://ns.adobe.com/xap/1.0/">'
+        '<dc:creator><rdf:Seq><rdf:li>VindIA (IA)</rdf:li></rdf:Seq></dc:creator>'
+        '<dc:type><rdf:Bag><rdf:li>AI-generated</rdf:li></rdf:Bag></dc:type>'
+        f'<dc:description><rdf:Alt><rdf:li xml:lang="x-default">{AI_META}</rdf:li></rdf:Alt></dc:description>'
+        '<xmp:CreatorTool>VindIA — generative AI assistant</xmp:CreatorTool>'
+        '<xmpRights:Marked>True</xmpRights:Marked>'
+        '<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">'
+        'Contenu généré par intelligence artificielle. Vérifier avant usage.'
+        '</rdf:li></rdf:Alt></xmpRights:UsageTerms>'
+        '</rdf:Description></rdf:RDF></x:xmpmeta>'
+    )
+
+
+# En-tête ajouté aux fichiers TEXTE générés (md, txt, csv…) : marquage lisible par
+# un humain ET repérable par une machine (ligne préfixée, format stable).
+TEXT_MARK = f"<!-- {AI_META} -->"
+
 
 def _tag_office_meta(props) -> None:
     """Marque les propriétés d'un document Office comme contenu généré par IA."""
@@ -339,8 +370,13 @@ def _build_pdf(content: str, base_dir=None) -> bytes:
         pdf.set_creator("VindIA — AI-generated")
         pdf.set_subject(AI_META)
         pdf.set_keywords("AI-generated, VindIA, EU AI Act art.50")
+        pdf.set_producer("VindIA (generative AI)")
     except Exception:
         pass
+    try:
+        pdf.set_xmp_metadata(_xmp_provenance())   # provenance normalisée (XMP)
+    except Exception as exc:  # ne pas masquer : un XMP invalide doit se voir
+        print(f"[VindIA] XMP non appliqué : {exc}")
     return bytes(pdf.output())
 
 

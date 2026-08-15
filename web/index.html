@@ -88,14 +88,18 @@
   .transcript .you b{color:var(--text)}
   .transcript .ai b{color:var(--primary)}
   .typebar{display:flex; gap:8px; margin-top:16px}
-  .typebar input{flex:1; padding:11px 14px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:14px; outline:none}
+  .typebar input{flex:1; min-width:0; padding:11px 14px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:14px; outline:none}
   .typebar input:focus{border-color:var(--accent)}
   .typebar button{padding:0 16px; border:none; border-radius:12px; background:var(--primary); color:#fff; font-weight:600; cursor:pointer}
-  .projbar{display:flex; gap:8px; margin-top:14px; align-items:center}
+  .projbar{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center}
   /* Sans cette règle, display:flex l'emporte sur l'attribut hidden et la barre
      resterait visible même masquée par le script. */
   .projbar[hidden]{display:none}
-  .projbar select{flex:1; padding:9px 12px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:13px; background:#fff; outline:none; color:#374151}
+  /* min-width:0 est INDISPENSABLE : par défaut un élément flex refuse de rétrécir
+     sous la largeur de son contenu (min-width:auto). Avec un nom de projet long,
+     le select poussait la barre au-delà de la fenêtre → défilement horizontal.
+     La base 200px le fait passer à la ligne plutôt que devenir illisible. */
+  .projbar select{flex:1 1 200px; min-width:0; padding:9px 12px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:13px; background:#fff; outline:none; color:#374151}
   .projbar select:focus{border-color:var(--accent)}
   .projbar button{padding:9px 13px; border:1px solid #e5e7eb; border-radius:12px; background:#fff; color:var(--primary); font:inherit; font-size:13px; font-weight:600; cursor:pointer}
   .projbar button:hover{border-color:var(--accent)}
@@ -683,8 +687,9 @@
         const o = document.createElement('option');
         o.value = p.project_id;
         const marks = [];
-        if (p.documents && p.documents.length) marks.push(p.documents.length + ' fichiers');
-        if (p.workspaces && p.workspaces.length) marks.push(p.workspaces.length + ' dossiers');
+        const plur = (n, mot) => n + ' ' + mot + (n > 1 ? 's' : '');
+        if (p.documents && p.documents.length) marks.push(plur(p.documents.length, 'fichier'));
+        if (p.workspaces && p.workspaces.length) marks.push(plur(p.workspaces.length, 'dossier'));
         o.textContent = p.name + (marks.length ? ' (' + marks.join(', ') + ')' : '');
         projSelect.appendChild(o);
       });

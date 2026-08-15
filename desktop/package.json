@@ -1,0 +1,33 @@
+{
+  "name": "vindia-desktop",
+  "productName": "VindIA",
+  "version": "1.0.0",
+  "description": "VindIA — assistant IA souverain, application de bureau",
+  "author": "EI Faugère Davy",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "fr.faugeredavy.vindia",
+    "productName": "VindIA",
+    "files": ["main.js", "preload.js", "build/**"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "VindIA"
+    }
+  }
+}

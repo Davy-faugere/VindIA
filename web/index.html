@@ -37,8 +37,22 @@
   @media(min-width:720px){
     .card{max-width:560px; padding:36px 34px 30px}
   }
+  /* Application de bureau : la page n'est plus une carte flottante posée sur un fond,
+     elle OCCUPE la fenêtre — sinon on voit une vignette au milieu du vide, et les
+     48px de padding du body suffisent à déclencher une barre de défilement.
+     Le contenu, lui, reste borné à une largeur de lecture confortable. */
   @media(min-width:980px){
-    .card{max-width:640px}   /* fenêtre de l'application de bureau */
+    body{padding:0; align-items:stretch}
+    .card{
+      max-width:none; width:100%; min-height:100vh;
+      border:none; border-radius:0; box-shadow:none; padding:24px 32px;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+    }
+    .card > .transcript, .card > .projbar, .card > .typebar, .card > .actions{
+      width:100%; max-width:620px;
+    }
+    /* Le transcript est la SEULE zone qui défile : l'orbe et la saisie restent en vue. */
+    .transcript{max-height:min(280px, 30vh)}
   }
   .brand{display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:4px}
   .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent)}

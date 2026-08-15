@@ -40,6 +40,7 @@ from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
 from shared.agent.sync_store import SyncStore
+from shared.agent.workspace_tools import build_workspace_tools
 from shared.agent.synced_tools import build_synced_tools
 from shared.agent.transcribe_tools import build_transcribe_tool
 
@@ -357,11 +358,20 @@ async def ask(request: web.Request) -> web.Response:
     # robuste aux redémarrages ; à défaut, on retombe sur l'état mémoire _active_project.
     session_tools = []
     active_pid = (data.get("project_id") or "").strip() or _active_project.get(member_id)
-    if active_pid and _projects is not None and _projects.get_project(member_id, active_pid):
+    active_proj = (
+        _projects.get_project(member_id, active_pid) if (active_pid and _projects) else None
+    )
+    if active_proj is not None:
         session_tools += build_project_tools(_projects, member_id, active_pid)
         # Rappelle à VindIA quels fichiers existent (index léger) pour qu'elle les lise.
         if hasattr(_llm, "load_project"):
             _llm.load_project(member_id, _projects.build_index(member_id, active_pid))
+    # Dossiers de l'ordinateur (application de bureau) : accessibles à TOUT membre, dans
+    # son seul espace. Un projet actif AVEC des dossiers rattachés restreint la vue à
+    # ceux-là — c'est le « dossier associé au projet » ; sinon, tous ses dossiers.
+    if _sync is not None:
+        allowed = active_proj.workspaces if (active_proj and active_proj.workspaces) else None
+        session_tools += build_workspace_tools(_sync, member_id, allowed)
     if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement
     if ident["admin"]:
@@ -485,6 +495,42 @@ async def projects_create(request: web.Request) -> web.Response:
         return web.json_response({"error": "nom de projet vide"}, status=400)
     proj = _projects.create_project(ident["member_id"], name)
     return web.json_response({"project": proj.as_dict()})
+
+
+async def project_folders(request: web.Request) -> web.Response:
+    """POST /projects/folders {project_id, workspaces:[…]} → rattache des dossiers au projet.
+
+    Un projet n'est pas qu'un nom : il désigne un sujet ET les dossiers de l'ordinateur
+    qui vont avec. Une fois rattachés, VindIA ne voit QUE ces dossiers quand le projet
+    est actif — ce qui cadre son travail au lieu de tout lui exposer.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    if _projects is None:
+        return web.json_response({"error": "projets indisponibles"}, status=503)
+    project_id = (data.get("project_id") or "").strip()
+    workspaces = data.get("workspaces")
+    if not isinstance(workspaces, list):
+        return web.json_response({"error": "workspaces doit être une liste"}, status=400)
+    # On n'accepte que des dossiers qui existent RÉELLEMENT chez ce membre : le client
+    # ne peut donc pas rattacher l'espace d'un autre, même en forgeant la requête.
+    member_id = ident["member_id"]
+    known = {w["workspace"] for w in (_sync.list_workspaces(member_id) if _sync else [])}
+    asked = [str(w) for w in workspaces][:20]
+    valid = [w for w in asked if w in known]
+    try:
+        proj = _projects.set_workspaces(member_id, project_id, valid)
+    except ValueError:
+        return web.json_response({"error": "projet inconnu"}, status=404)
+    # Le projet actif change de périmètre → l'index injecté au LLM doit suivre.
+    if _active_project.get(member_id) == project_id and _llm is not None and hasattr(_llm, "load_project"):
+        _llm.load_project(member_id, _projects.build_index(member_id, project_id))
+    return web.json_response({"project": proj.as_dict(), "ignored": [w for w in asked if w not in known]})
 
 
 async def project_file(request: web.Request) -> web.Response:
@@ -885,6 +931,7 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/create", projects_create)
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
+    app.router.add_post("/projects/folders", project_folders)
     app.router.add_post("/upload", upload)
     app.router.add_post("/sync/workspaces", sync_workspaces)
     app.router.add_post("/sync/register", sync_register)

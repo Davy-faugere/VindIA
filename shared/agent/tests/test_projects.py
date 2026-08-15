@@ -5,6 +5,7 @@ et l'ingestion texte. Les formats binaires (docx/xlsx/pptx/pdf) ne sont pas test
 ici (libs tierces) — seul le routage par extension et le texte pur le sont.
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -133,6 +134,63 @@ class ProjectCrudTest(unittest.TestCase):
             store = _store(tmp)
             p = store.create_project(ALICE, "Vide")
             self.assertEqual(store.build_context(ALICE, p.project_id), "")
+
+
+class WorkspacesTest(unittest.TestCase):
+    """Un projet rattache des DOSSIERS de l'ordinateur, pas seulement un nom."""
+
+    def test_set_and_persist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            p = store.create_project(ALICE, "Chantier")
+            store.set_workspaces(ALICE, p.project_id, ["Projet Alpha", "Comptabilité"])
+            # Relu depuis le disque : le rattachement survit au redémarrage.
+            again = _store(tmp).get_project(ALICE, p.project_id)
+            # Même règle de slug que SyncStore.slug_workspace (accents non
+            # translittérés) → les deux côtés désignent forcément le même dossier.
+            self.assertEqual(again.workspaces, ["projet-alpha", "comptabilit"])
+            from shared.agent.sync_store import slug_workspace
+
+            self.assertEqual(slug_workspace("Comptabilité"), again.workspaces[1])
+
+    def test_duplicates_and_blanks_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            p = store.create_project(ALICE, "P")
+            got = store.set_workspaces(ALICE, p.project_id, ["Alpha", "alpha", "", "   "])
+            self.assertEqual(got.workspaces, ["alpha"])
+
+    def test_adding_a_document_keeps_workspaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            p = store.create_project(ALICE, "P")
+            store.set_workspaces(ALICE, p.project_id, ["Alpha"])
+            store.add_document(ALICE, p.project_id, "note.txt", "texte")
+            self.assertEqual(store.get_project(ALICE, p.project_id).workspaces, ["alpha"])
+
+    def test_index_announces_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            p = store.create_project(ALICE, "P")
+            store.set_workspaces(ALICE, p.project_id, ["Alpha"])
+            idx = store.build_index(ALICE, p.project_id)
+            self.assertIn("alpha", idx)
+            self.assertIn("folder_list_files", idx)   # dit COMMENT y accéder
+
+    def test_unknown_project_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                _store(tmp).set_workspaces(ALICE, "nope", ["Alpha"])
+
+    def test_legacy_meta_without_workspaces_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            p = store.create_project(ALICE, "Ancien")
+            meta = Path(tmp) / ALICE / p.project_id / "meta.json"
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            del data["workspaces"]           # projet créé avant la fonctionnalité
+            meta.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(store.get_project(ALICE, p.project_id).workspaces, [])
 
 
 class ExtractTextTest(unittest.TestCase):

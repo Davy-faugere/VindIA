@@ -39,6 +39,8 @@ from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+from shared.agent.skill_tools import build_skill_tools
+from shared.agent.skills import SkillStore
 from shared.agent.sync_store import SyncStore
 from shared.agent.workspace_tools import build_workspace_tools
 from shared.agent.synced_tools import build_synced_tools
@@ -76,6 +78,7 @@ _vps_tools = []   # outils VPS (lecture seule) — RÉSERVÉS à l'admin, hors r
 _approvals = None # ApprovalStore : validation humaine des comptes (pending/approved/refused)
 _telegram = None  # TelegramNotifier : alerte l'admin d'une nouvelle inscription (ou None)
 _email = None     # EmailNotifier : même alerte par e-mail (ou None si SMTP non configuré)
+_skills = None    # SkillStore : fiches de méthode (livrées + personnelles)
 _sync = None      # SyncStore : espaces de travail synchronisés avec l'application de bureau
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
@@ -112,7 +115,7 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync, _skills
     if _llm is not None:
         return
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
@@ -133,6 +136,12 @@ def _init_services() -> None:
     _sync = SyncStore(os.path.join(_DATA_DIR, "workspaces"))
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
+    # Compétences : fiches livrées avec le code + fiches personnelles par membre.
+    _skills = SkillStore(
+        str(_ROOT / "shared" / "agent" / "skills"),   # livrées avec le code
+        os.path.join(_DATA_DIR, "skills"),            # personnelles, hors repo
+    )
+    print(f"[VindIA] Compétences chargées : {len(_skills.list_skills())} fiches livrées.")
     # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
     # Sans VINDIA_VAULT_KEY → pas de coffre (on refuse de stocker des jetons en clair).
     vault_key = os.environ.get("VINDIA_VAULT_KEY", "").strip()
@@ -357,6 +366,12 @@ async def ask(request: web.Request) -> web.Response:
     # Le projet actif vient du corps de la requête (la page l'envoie à chaque message) —
     # robuste aux redémarrages ; à défaut, on retombe sur l'état mémoire _active_project.
     session_tools = []
+    # Compétences : le SOMMAIRE part dans le contexte, les fiches se lisent à la demande.
+    # Canal distinct du projet → changer de projet ne fait pas oublier les méthodes.
+    if _skills is not None:
+        session_tools += build_skill_tools(_skills, member_id)
+        if hasattr(_llm, "load_skills"):
+            _llm.load_skills(session_key, _skills.build_index(member_id))
     active_pid = (data.get("project_id") or "").strip() or _active_project.get(member_id)
     active_proj = (
         _projects.get_project(member_id, active_pid) if (active_pid and _projects) else None
@@ -495,6 +510,49 @@ async def projects_create(request: web.Request) -> web.Response:
         return web.json_response({"error": "nom de projet vide"}, status=400)
     proj = _projects.create_project(ident["member_id"], name)
     return web.json_response({"project": proj.as_dict()})
+
+
+async def skills_list(request: web.Request) -> web.Response:
+    """POST /skills/list → compétences visibles par ce membre (livrées + perso)."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    if _skills is None:
+        return web.json_response({"skills": []})
+    skills = _skills.list_skills(ident["member_id"])
+    return web.json_response({"skills": [s.as_dict() for s in skills]})
+
+
+async def skills_read(request: web.Request) -> web.Response:
+    """POST /skills/read {name} → contenu d'une fiche."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    content = _skills.read_skill(ident["member_id"], (data.get("name") or "")) if _skills else ""
+    if not content:
+        return web.json_response({"error": "compétence introuvable"}, status=404)
+    return web.json_response({"content": content})
+
+
+async def skills_delete(request: web.Request) -> web.Response:
+    """POST /skills/delete {name} → supprime une compétence PERSONNELLE.
+
+    Les fiches livrées ne sont jamais supprimables : si le membre en avait remplacé
+    une, la suppression rétablit simplement la version d'origine.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    ok = _skills.delete_skill(ident["member_id"], (data.get("name") or "")) if _skills else False
+    return web.json_response({"ok": ok})
 
 
 async def project_folders(request: web.Request) -> web.Response:
@@ -932,6 +990,9 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/projects/folders", project_folders)
+    app.router.add_post("/skills/list", skills_list)
+    app.router.add_post("/skills/read", skills_read)
+    app.router.add_post("/skills/delete", skills_delete)
     app.router.add_post("/upload", upload)
     app.router.add_post("/sync/workspaces", sync_workspaces)
     app.router.add_post("/sync/register", sync_register)

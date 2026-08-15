@@ -273,6 +273,7 @@
       <p class="login-err" id="loginErr"></p>
       <button id="loginToggle" type="button" class="switch" style="margin-top:6px">Pas de compte ? Créer un compte</button>
       <button id="forgotBtn" type="button" class="switch" style="margin-top:2px">Mot de passe oublié ?</button>
+      <button id="resendBtn" type="button" class="switch" style="margin-top:2px" hidden>Renvoyer l'e-mail de confirmation</button>
     </form>
   </div>
 
@@ -376,6 +377,28 @@
     bar.style.width = pct + '%'; bar.style.background = col;
   }
 
+  // Les messages d'erreur de Supabase sont techniques et en anglais : on les rend
+  // compréhensibles et actionnables.
+  function frError(msg) {
+    const m = (msg || '').toLowerCase();
+    let s;
+    if ((s = m.match(/after (\d+) seconds?/)))
+      return `Trop de tentatives rapprochées. Patiente ${s[1]} secondes avant de réessayer.`;
+    if (m.includes('already registered') || m.includes('already exists'))
+      return "Cette adresse a déjà un compte. Connecte-toi, ou utilise « Mot de passe oublié ».";
+    if (m.includes('email not confirmed'))
+      return "Ton adresse n'est pas encore confirmée : clique le lien reçu par e-mail.";
+    if (m.includes('invalid login credentials'))
+      return "Adresse ou mot de passe incorrect.";
+    if (m.includes('email rate limit') || m.includes('rate limit'))
+      return "Trop d'e-mails envoyés en peu de temps. Réessaie dans quelques minutes.";
+    if (m.includes('password') && m.includes('least'))
+      return "Mot de passe trop court : 12 caractères minimum.";
+    if (m.includes('invalid') && m.includes('email'))
+      return "Adresse e-mail invalide.";
+    return msg || "Opération impossible.";
+  }
+
   // Formulaire login / inscription (bascule via le lien).
   let _signupMode = false;
   function setSignupMode(on) {
@@ -401,7 +424,7 @@
       const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/' });
       err.style.color = error ? '' : '#15803d';
       err.textContent = error
-        ? "Envoi impossible : " + (error.message || '')
+        ? frError(error.message)
         : "E-mail envoyé. Clique le lien reçu pour choisir un nouveau mot de passe.";
     } catch (e) { err.textContent = "Envoi impossible, réessaie."; }
     finally { b.disabled = false; b.textContent = 'Mot de passe oublié ?'; }
@@ -438,8 +461,15 @@
           err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial.";
           return;
         }
-        const { error } = await sb.auth.signUp({ email, password: pass });
-        if (error) { err.textContent = 'Inscription impossible : ' + (error.message || ''); }
+        const { data, error } = await sb.auth.signUp({ email, password: pass });
+        if (error) { err.textContent = frError(error.message); }
+        else if (data && data.user && data.user.identities && data.user.identities.length === 0) {
+          // Supabase renvoie un utilisateur sans identité quand l'adresse existe déjà :
+          // le compte est créé mais jamais confirmé. On propose de renvoyer l'e-mail.
+          err.style.color = '';
+          err.textContent = "Cette adresse a déjà un compte non confirmé.";
+          $('resendBtn').hidden = false;
+        }
         else {
           err.style.color = '#15803d';
           err.textContent = "Compte créé ! Vérifie tes e-mails pour confirmer, puis connecte-toi.";
@@ -447,11 +477,28 @@
         }
       } else {
         const { error } = await sb.auth.signInWithPassword({ email, password: pass });
-        if (error) { err.textContent = 'Identifiants incorrects ou e-mail non confirmé.'; }
+        if (error) {
+          err.textContent = frError(error.message);
+          if ((error.message || '').toLowerCase().includes('not confirmed')) $('resendBtn').hidden = false;
+        }
         else { $('loginPass').value = ''; await resolveIdentity(); }
       }
     } catch (e) { err.textContent = 'Opération impossible, réessaie.'; }
     finally { btn.disabled = false; btn.textContent = _signupMode ? 'Créer mon compte' : 'Se connecter'; }
+  });
+
+  // Renvoi de l'e-mail de confirmation (compte créé mais adresse jamais validée).
+  $('resendBtn').addEventListener('click', async () => {
+    const email = $('loginEmail').value.trim(), err = $('loginErr'), b = $('resendBtn');
+    if (!email) { err.textContent = "Saisis d'abord ton adresse e-mail."; return; }
+    b.disabled = true; b.textContent = 'Envoi…';
+    try {
+      const { error } = await sb.auth.resend({ type: 'signup', email });
+      err.style.color = error ? '' : '#15803d';
+      err.textContent = error ? frError(error.message)
+        : "E-mail de confirmation renvoyé. Pense à regarder dans les indésirables.";
+    } catch (e) { err.textContent = "Envoi impossible, réessaie."; }
+    finally { b.disabled = false; b.textContent = "Renvoyer l'e-mail de confirmation"; }
   });
 
   $('pendingLogout').addEventListener('click', async () => { await sb.auth.signOut(); showLogin(); });

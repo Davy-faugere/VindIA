@@ -37,6 +37,7 @@ from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
 from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
+from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
 from shared.agent.synced_tools import build_synced_tools
 from shared.agent.transcribe_tools import build_transcribe_tool
@@ -72,6 +73,7 @@ _google = None    # GoogleOAuth : config app OAuth (None/non configuré si clés
 _vps_tools = []   # outils VPS (lecture seule) — RÉSERVÉS à l'admin, hors registre global
 _approvals = None # ApprovalStore : validation humaine des comptes (pending/approved/refused)
 _telegram = None  # TelegramNotifier : alerte l'admin d'une nouvelle inscription (ou None)
+_email = None     # EmailNotifier : même alerte par e-mail (ou None si SMTP non configuré)
 
 # Espace de données VindIA (projets/fichiers) — hors repo, hors MariaDB.
 _DATA_DIR = os.environ.get("VINDIA_DATA_DIR", "/root/vindia-data")
@@ -107,7 +109,7 @@ def _check_rate(code: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email
     if _llm is not None:
         return
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
@@ -121,6 +123,9 @@ def _init_services() -> None:
     _telegram = build_telegram_notifier()
     if _telegram:
         print("[VindIA] Notifications Telegram actives.")
+    _email = build_email_notifier()
+    if _email:
+        print("[VindIA] Alertes e-mail actives (nouvelles inscriptions).")
     # Projets : magasin disque isolé par membre (indépendant de MariaDB).
     _projects = ProjectStore(os.path.join(_DATA_DIR, "projects"))
     # Coffre à credentials : actif seulement si une clé de chiffrement est fournie.
@@ -427,10 +432,17 @@ async def _identify(request: web.Request):
     else:
         status, is_new = _approvals.request(ident["member_id"], ident.get("email") or "")
         ident["status"], ident["approved"] = status, (status == APPROVED)
-        if is_new and _telegram is not None:
-            await _telegram.notify(
-                f"VindIA — nouvelle inscription en attente de validation : {ident.get('email') or ident['member_id']}"
-            )
+        if is_new:
+            # Alerter l'administrateur : sans cela une inscription passe inaperçue et
+            # la personne attend indéfiniment. Best-effort sur les deux canaux.
+            who = ident.get("email") or ident["member_id"]
+            if _telegram is not None:
+                await _telegram.notify(
+                    f"VindIA — nouvelle inscription en attente de validation : {who}"
+                )
+            if _email is not None:
+                subject, body = signup_message(ident.get("email", ""), ident["member_id"], _PUBLIC_URL)
+                await _email.notify(subject, body)
     return ident
 
 

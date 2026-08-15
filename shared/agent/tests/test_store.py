@@ -153,5 +153,47 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(s.get_memories(mid)), 3)
 
 
+class ReconnectTest(unittest.TestCase):
+    """La connexion morte (MariaDB wait_timeout / reboot) doit être rétablie."""
+
+    class _DeadThenAlive:
+        """Connexion factice : échoue une fois, puis marche après ping(reconnect)."""
+
+        def __init__(self, real):
+            self._real = real
+            self.failed_once = False
+            self.pinged = False
+
+        def cursor(self):
+            if not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("MySQL server has gone away")
+            return self._real.cursor()
+
+        def ping(self, reconnect=False):
+            self.pinged = True
+
+        def commit(self):
+            self._real.commit()
+
+    def test_reconnects_and_retries_once(self):
+        real = sqlite3.connect(":memory:")
+        real.executescript(_SQLITE_SCHEMA)
+        conn = self._DeadThenAlive(real)
+        s = Store(conn, paramstyle="qmark")
+        row = s._exec("SELECT 1").fetchone()   # 1er essai échoue → ping → réussit
+        self.assertEqual(row[0], 1)
+        self.assertTrue(conn.pinged)
+
+    def test_without_ping_error_propagates(self):
+        # SQLite (pas de ping) : l'erreur remonte, pas de boucle silencieuse.
+        class NoPing:
+            def cursor(self):
+                raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            Store(NoPing(), paramstyle="qmark")._exec("SELECT 1")
+
+
 if __name__ == "__main__":
     unittest.main()

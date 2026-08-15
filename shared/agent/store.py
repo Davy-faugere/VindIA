@@ -22,9 +22,25 @@ class Store:
         return sql.replace("?", self._ph)
 
     def _exec(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
-        cur = self._conn.cursor()
-        cur.execute(self._q(sql), params)
-        return cur
+        """Exécute une requête, en RECONNECTANT si la connexion est morte.
+
+        MariaDB ferme les connexions inactives (wait_timeout, 8 h par défaut) : sans
+        cela la mémoire long-terme tombait silencieusement après une longue inactivité
+        ou un redémarrage du serveur de base. On réessaie UNE fois après un ping de
+        reconnexion (PyMySQL) ; SQLite n'a pas de ping et n'en a pas besoin.
+        """
+        try:
+            cur = self._conn.cursor()
+            cur.execute(self._q(sql), params)
+            return cur
+        except Exception:
+            ping = getattr(self._conn, "ping", None)
+            if ping is None:
+                raise
+            ping(reconnect=True)  # rétablit la connexion, sinon lève
+            cur = self._conn.cursor()
+            cur.execute(self._q(sql), params)
+            return cur
 
     # --- tenants / members ---
     def create_tenant(self, name: str) -> str:

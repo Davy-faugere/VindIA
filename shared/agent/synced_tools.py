@@ -160,7 +160,10 @@ class SyncedWriteTool(Tool):
                 return f"Génération du fichier impossible : {str(exc)[:160]}"
             (dest / filename).write_bytes(payload)
         else:
-            (dest / filename).write_text(content, encoding="utf-8")
+            # Transparence IA (AI Act art. 50) : marquage en tête des fichiers texte.
+            from .officegen import AI_NOTICE
+            marked = f"{AI_NOTICE}\n\n{content}" if not content.startswith(AI_NOTICE) else content
+            (dest / filename).write_text(marked, encoding="utf-8")
         return (
             f"Fichier « {filename} » créé dans « {_CREATIONS} ». "
             "Il apparaîtra dans ton dossier synchronisé sur ton ordinateur."

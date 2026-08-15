@@ -88,11 +88,26 @@ class SyncedToolsTest(unittest.TestCase):
             self.assertEqual(calls["name"], "rapport.docx")
             self.assertTrue(written.startswith(b"PK"))  # binaire, pas du markdown
 
-    def test_write_text_stays_text(self):
+    def test_write_text_stays_text_and_is_marked_ai(self):
+        # Le texte reste du texte (pas de binaire), et porte la mention IA exigée
+        # par l'AI Act art. 50 en tête de fichier.
         from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        from shared.agent.officegen import AI_NOTICE
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(SyncedWriteTool(tmp).run({"filename": "note.md", "content": "# Salut"}))
-            self.assertEqual((Path(tmp) / _CREATIONS / "note.md").read_text(), "# Salut")
+            written = (Path(tmp) / _CREATIONS / "note.md").read_text()
+            self.assertTrue(written.startswith(AI_NOTICE))
+            self.assertIn("# Salut", written)
+
+    def test_write_text_does_not_duplicate_notice(self):
+        # Un contenu déjà marqué ne doit pas recevoir la mention une seconde fois.
+        from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        from shared.agent.officegen import AI_NOTICE
+        with tempfile.TemporaryDirectory() as tmp:
+            asyncio.run(SyncedWriteTool(tmp).run(
+                {"filename": "n.md", "content": AI_NOTICE + "\n\ndéjà marqué"}))
+            written = (Path(tmp) / _CREATIONS / "n.md").read_text()
+            self.assertEqual(written.count(AI_NOTICE), 1)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -171,6 +171,9 @@ class Project:
     name: str
     created_at: str
     documents: List[Document]
+    # Dossiers de l'ordinateur (espaces synchronisés) rattachés au projet. Un projet
+    # n'est pas seulement un nom : c'est un sujet ET les dossiers qui vont avec.
+    workspaces: List[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -178,6 +181,7 @@ class Project:
             "name": self.name,
             "created_at": self.created_at,
             "documents": [d.__dict__ for d in self.documents],
+            "workspaces": list(self.workspaces),
         }
 
 
@@ -261,8 +265,30 @@ class ProjectStore:
         doc = Document(fname, len(text), self._clock())
         # Remplace un éventuel doc de même nom (ré-upload), sinon ajoute.
         docs = [d for d in proj.documents if d.filename != fname] + [doc]
-        self._write_meta(member_id, Project(proj.project_id, proj.name, proj.created_at, docs))
+        # `workspaces` est reporté : ajouter un document ne doit pas détacher les dossiers.
+        self._write_meta(
+            member_id, Project(proj.project_id, proj.name, proj.created_at, docs, proj.workspaces)
+        )
         return doc
+
+    def set_workspaces(self, member_id: str, project_id: str, workspaces) -> Project:
+        """Rattache la liste des dossiers de l'ordinateur au projet (remplace l'ancienne).
+
+        Les noms sont normalisés comme dans SyncStore (même slug) : le projet et
+        l'espace synchronisé désignent alors forcément le même dossier.
+        """
+        proj = self.get_project(member_id, project_id)
+        if proj is None:
+            raise ValueError("projet inconnu")
+        seen, clean = set(), []
+        for w in workspaces or []:
+            slug = slugify(str(w), fallback="")
+            if slug and slug not in seen:
+                seen.add(slug)
+                clean.append(slug)
+        updated = Project(proj.project_id, proj.name, proj.created_at, proj.documents, clean)
+        self._write_meta(member_id, updated)
+        return updated
 
     def read_document(self, member_id: str, project_id: str, filename: str) -> str:
         path = self._project_dir(member_id, project_id) / "docs" / f"{safe_filename(filename)}.txt"
@@ -297,13 +323,23 @@ class ProjectStore:
         if proj is None:
             return ""
         head = f"[Projet de référence actif : « {proj.name} »]"
-        if not proj.documents:
-            return head + "\nLe projet est vide. Tu peux y créer des fichiers (write_project_file)."
-        files = "\n".join(f"- {d.filename}" for d in proj.documents)
-        return (
-            f"{head}\nFichiers disponibles (lis-les à la demande avec read_project_file, "
-            f"n'invente jamais leur contenu) :\n{files}"
-        )
+        parts = [head]
+        if proj.documents:
+            files = "\n".join(f"- {d.filename}" for d in proj.documents)
+            parts.append(
+                "Fichiers du projet (lis-les à la demande avec read_project_file, "
+                f"n'invente jamais leur contenu) :\n{files}"
+            )
+        else:
+            parts.append("Le projet est vide. Tu peux y créer des fichiers (write_project_file).")
+        if proj.workspaces:
+            # On annonce les dossiers, pas leur contenu : VindIA les explore à la demande.
+            dossiers = "\n".join(f"- {w}" for w in proj.workspaces)
+            parts.append(
+                "Dossiers de l'ordinateur rattachés à ce projet (explore-les avec "
+                f"folder_list_files, lis avec folder_read_file) :\n{dossiers}"
+            )
+        return "\n".join(parts)
 
     # -- persistance meta ---------------------------------------------------- #
     def _write_meta(self, member_id: str, proj: Project) -> None:
@@ -314,4 +350,8 @@ class ProjectStore:
     def _read_meta(meta_path: Path) -> Project:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         docs = [Document(**d) for d in data.get("documents", [])]
-        return Project(data["project_id"], data["name"], data.get("created_at", ""), docs)
+        # `workspaces` absent des projets créés avant cette fonctionnalité → liste vide.
+        return Project(
+            data["project_id"], data["name"], data.get("created_at", ""), docs,
+            list(data.get("workspaces") or []),
+        )

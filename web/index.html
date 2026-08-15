@@ -68,6 +68,9 @@
   .typebar input:focus{border-color:var(--accent)}
   .typebar button{padding:0 16px; border:none; border-radius:12px; background:var(--primary); color:#fff; font-weight:600; cursor:pointer}
   .projbar{display:flex; gap:8px; margin-top:14px; align-items:center}
+  /* Sans cette règle, display:flex l'emporte sur l'attribut hidden et la barre
+     resterait visible même masquée par le script. */
+  .projbar[hidden]{display:none}
   .projbar select{flex:1; padding:9px 12px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:13px; background:#fff; outline:none; color:#374151}
   .projbar select:focus{border-color:var(--accent)}
   .projbar button{padding:9px 13px; border:1px solid #e5e7eb; border-radius:12px; background:#fff; color:var(--primary); font:inherit; font-size:13px; font-weight:600; cursor:pointer}

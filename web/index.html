@@ -91,6 +91,10 @@
   .sheet-x{background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer}
   .sheet-sub{color:var(--muted); font-size:13px; margin:8px 0 14px}
   .conn-list{display:flex; flex-direction:column; gap:10px}
+  .skill-view{white-space:pre-wrap; font:inherit; font-size:13px; line-height:1.55; color:#374151;
+    background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin-top:12px;
+    max-height:46vh; overflow:auto}
+  .skill-tag{font-size:11px; font-weight:600; color:var(--accent); letter-spacing:.03em}
   .conn-row{display:flex; align-items:center; justify-content:space-between; gap:10px;
     border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px}
   .conn-name{font-size:14px; font-weight:600}
@@ -191,6 +195,7 @@
     <div class="actions">
       <button id="englishBtn" class="switch" type="button">Cours d'anglais</button>
       <button id="foldersBtn" class="switch" type="button" hidden>Mes dossiers</button>
+      <button id="skillsBtn" class="switch" type="button">Compétences</button>
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button" hidden>Connexions</button>
@@ -210,6 +215,19 @@
       <div id="foldersList" class="conn-list"></div>
       <button id="addFolderBtn" class="conn-btn" type="button" style="margin-top:12px">Ajouter un dossier</button>
       <p class="sheet-note" id="foldersNote"></p>
+    </div>
+  </div>
+
+  <div class="overlay" id="skillsOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Compétences</span>
+        <button id="skillsClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Les méthodes que VindIA applique. Dis-lui « retiens ma façon de… » pour en ajouter une à toi.</p>
+      <div id="skillsList" class="conn-list"></div>
+      <pre id="skillView" class="skill-view" hidden></pre>
+      <p class="sheet-note" id="skillsNote"></p>
     </div>
   </div>
 
@@ -802,6 +820,55 @@
       if (!silent) folderNote().textContent = 'Synchronisation impossible : ' + e.message;
     } finally { syncing = false; }
   }
+
+  // ── Compétences : les méthodes que VindIA applique ────────────────────────
+  async function renderSkills() {
+    const list = $('skillsList'), note = $('skillsNote'), view = $('skillView');
+    list.innerHTML = ''; note.textContent = ''; view.hidden = true;
+    let skills = [];
+    try { skills = (await projApi('/skills/list')).skills || []; }
+    catch (e) { note.textContent = e.message; return; }
+    if (!skills.length) { note.textContent = 'Aucune compétence.'; return; }
+    for (const s of skills) {
+      const row = document.createElement('div'); row.className = 'conn-row';
+      const left = document.createElement('div');
+      const name = document.createElement('div'); name.className = 'conn-name'; name.textContent = s.title;
+      const meta = document.createElement('div'); meta.className = 'conn-meta'; meta.textContent = s.description;
+      left.appendChild(name); left.appendChild(meta);
+      if (s.source === 'perso') {
+        const tag = document.createElement('div'); tag.className = 'skill-tag'; tag.textContent = 'À TOI';
+        left.appendChild(tag);
+      }
+      const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.gap = '6px';
+      const open = document.createElement('button'); open.className = 'conn-btn off'; open.textContent = 'Voir';
+      open.onclick = async () => {
+        try {
+          const d = await projApi('/skills/read', { name: s.name });
+          view.textContent = d.content; view.hidden = false;
+          view.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } catch (e) { note.textContent = e.message; }
+      };
+      wrap.appendChild(open);
+      if (s.source === 'perso') {
+        const del = document.createElement('button'); del.className = 'conn-btn off'; del.textContent = 'Retirer';
+        del.onclick = async () => {
+          await projApi('/skills/delete', { name: s.name });
+          await renderSkills();
+        };
+        wrap.appendChild(del);
+      }
+      row.appendChild(left); row.appendChild(wrap);
+      list.appendChild(row);
+    }
+  }
+
+  $('skillsBtn').addEventListener('click', async () => {
+    $('skillsOverlay').hidden = false; await renderSkills();
+  });
+  $('skillsClose').addEventListener('click', () => { $('skillsOverlay').hidden = true; });
+  $('skillsOverlay').addEventListener('click', (e) => {
+    if (e.target === $('skillsOverlay')) $('skillsOverlay').hidden = true;
+  });
 
   // ── Dossiers rattachés au projet actif ────────────────────────────────────
   // Un projet = un sujet ET les dossiers qui vont avec. La liste vient du SERVEUR

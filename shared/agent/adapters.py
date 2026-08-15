@@ -75,7 +75,13 @@ VINDIA_SYSTEM_PROMPT = (
     "<script>) entre [[FICHIER:page.html]] et [[/FICHIER]] : design moderne, couleurs, mise "
     "en page responsive, et interactivité (menus, boutons) sont permis.\n"
     "8. Si un projet ou un dossier synchronisé est actif, tu peux enregistrer un fichier "
-    "directement chez l'utilisateur avec tes outils d'écriture."
+    "directement chez l'utilisateur avec tes outils d'écriture.\n"
+    "9. COMPÉTENCES : tu disposes de fiches de méthode. Quand la demande correspond à "
+    "l'une d'elles (rédiger un compte-rendu, produire un document, analyser un tableur, "
+    "suivre un projet, chercher sur le web…), lis-la avec read_skill AVANT de produire, "
+    "et applique-la. Ne devine pas la méthode si une fiche existe. Si l'utilisateur "
+    "explique comment il veut que tu procèdes et demande de t'en souvenir, enregistre-la "
+    "avec save_skill."
 )
 
 # Mode « professeur d'anglais » : conversation en anglais, corrections expliquées en
@@ -173,6 +179,7 @@ class MistralLLM:
         self._memory_context: Dict[str, str] = {}
         # Contexte du PROJET actif (documents de l'utilisateur), injecté par ProjectStore.
         self._project_context: Dict[str, str] = {}
+        self._skills_context: Dict[str, str] = {}
         self._client = None  # mémoïsé au 1er appel live
 
     async def reply(
@@ -194,6 +201,7 @@ class MistralLLM:
             for p in (
                 system_override or self._system_prompt,
                 self._memory_context.get(session_id),
+                self._skills_context.get(session_id),
                 self._project_context.get(session_id),
             )
             if p
@@ -271,10 +279,23 @@ class MistralLLM:
         else:
             self._project_context.pop(session_id, None)
 
+    def load_skills(self, session_id: str, context: str) -> None:
+        """Injecte le SOMMAIRE des compétences (noms + descriptions), jamais leur contenu.
+
+        Troisième canal, distinct de la mémoire et du projet : les compétences sont des
+        méthodes, pas des souvenirs ni des données. Elles restent donc en place quand on
+        change de projet.
+        """
+        if context:
+            self._skills_context[session_id] = context
+        else:
+            self._skills_context.pop(session_id, None)
+
     def unload_memory(self, session_id: str) -> None:
         """Libère la mémoire, le projet actif et l'historique d'une session fermée."""
         self._memory_context.pop(session_id, None)
         self._project_context.pop(session_id, None)
+        self._skills_context.pop(session_id, None)
         self._history.pop(session_id, None)
 
     def get_history(self, session_id: str) -> list:

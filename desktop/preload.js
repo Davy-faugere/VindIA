@@ -11,7 +11,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('vindiaDesktop', {
   // Indique à la page qu'elle tourne dans l'application (et non dans un navigateur).
   isDesktop: true,
-  version: '1.0.0',
+  version: '1.1.0',
 
   // Dossiers de travail
   pickFolder:   ()            => ipcRenderer.invoke('vindia:pickFolder'),

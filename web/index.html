@@ -189,6 +189,7 @@
 
     <div class="actions">
       <button id="englishBtn" class="switch" type="button">Cours d'anglais</button>
+      <button id="foldersBtn" class="switch" type="button" hidden>Mes dossiers</button>
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button" hidden>Connexions</button>
@@ -197,6 +198,19 @@
     </div>
     <footer>VindIA — voix française naturelle</footer>
   </main>
+
+  <div class="overlay" id="foldersOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Mes dossiers</span>
+        <button id="foldersClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Les dossiers de ton ordinateur que VindIA peut consulter. Ses créations y reviennent automatiquement.</p>
+      <div id="foldersList" class="conn-list"></div>
+      <button id="addFolderBtn" class="conn-btn" type="button" style="margin-top:12px">Ajouter un dossier</button>
+      <p class="sheet-note" id="foldersNote"></p>
+    </div>
+  </div>
 
   <div class="overlay" id="filesOverlay" hidden>
     <div class="sheet">
@@ -633,6 +647,136 @@
 
   loadProjects();
 
+  // ══ Synchronisation des dossiers du poste (application de bureau uniquement) ══
+  // La synchro est menée depuis la page : le jeton d'authentification ne quitte
+  // jamais celle-ci, et il n'y a qu'une seule base de code à maintenir.
+  const desktop = window.vindiaDesktop || null;
+
+  const toHex = (buf) => [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  const sha256 = async (bytes) => toHex(await crypto.subtle.digest('SHA-256', bytes));
+  function b64ToBytes(b64) {
+    const bin = atob(b64), a = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    return a;
+  }
+  function bytesToB64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {           // par tranches : évite un dépassement de pile
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(s);
+  }
+
+  let syncing = false;
+  const folderNote = () => $('foldersNote');
+
+  /** Synchronise un dossier local avec son espace côté serveur (dans les deux sens). */
+  async function syncFolder(dir) {
+    const label = dir.split(/[\\/]/).filter(Boolean).pop() || 'dossier';
+    const reg = await projApi('/sync/register', { workspace: label, label });
+    const ws = reg.workspace;
+    if (!ws) throw new Error("espace de travail refusé");
+
+    const localFiles = await desktop.listFiles(dir);
+    const remote = (await projApi('/sync/index', { workspace: ws })).files || {};
+    let sent = 0, received = 0;
+
+    // 1) Poste → serveur : uniquement ce qui a changé (comparaison par empreinte).
+    const seen = new Set();
+    for (const f of localFiles) {
+      seen.add(f.rel);
+      const b64 = await desktop.readFile(dir, f.rel);
+      if (!b64) continue;
+      const bytes = b64ToBytes(b64);
+      if (remote[f.rel] && remote[f.rel].hash === await sha256(bytes)) continue;
+      const fd = new FormData();
+      fd.append('workspace', ws);
+      fd.append('path', f.rel);
+      fd.append('file', new Blob([bytes]), f.rel.split('/').pop());
+      const r = await fetch('/sync/push', { method: 'POST', headers: await authHeaders(), body: fd });
+      if (r.ok) sent++;
+    }
+
+    // 2) Serveur → poste : les créations de VindIA, absentes en local.
+    for (const rel of Object.keys(remote)) {
+      if (seen.has(rel)) continue;
+      const r = await fetch('/sync/pull', {
+        method: 'POST', headers: await authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ workspace: ws, path: rel }),
+      });
+      if (!r.ok) continue;
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      if (await desktop.writeFile(dir, rel, bytesToB64(bytes))) received++;
+    }
+    return { sent, received };
+  }
+
+  /** Synchronise tous les dossiers déclarés. */
+  async function syncAll(silent = true) {
+    if (!desktop || syncing) return;
+    const dirs = await desktop.folders();
+    if (!dirs.length) return;
+    syncing = true;
+    let sent = 0, received = 0;
+    try {
+      for (const dir of dirs) {
+        const r = await syncFolder(dir);
+        sent += r.sent; received += r.received;
+      }
+      if (!silent) {
+        folderNote().textContent = sent || received
+          ? `${sent} envoyé(s), ${received} reçu(s).`
+          : 'Tout est déjà à jour.';
+      }
+      if (received) addLine('ai', received + (received > 1 ? ' nouveaux fichiers sont arrivés' : ' nouveau fichier est arrivé') + ' dans ton dossier.');
+    } catch (e) {
+      if (!silent) folderNote().textContent = 'Synchronisation impossible : ' + e.message;
+    } finally { syncing = false; }
+  }
+
+  async function renderFolders() {
+    const list = $('foldersList'); list.innerHTML = ''; folderNote().textContent = '';
+    const dirs = await desktop.folders();
+    if (!dirs.length) { folderNote().textContent = "Aucun dossier pour l'instant. Ajoute-en un pour que VindIA puisse y travailler."; return; }
+    for (const dir of dirs) {
+      const row = document.createElement('div'); row.className = 'conn-row';
+      const left = document.createElement('div');
+      const name = document.createElement('div'); name.className = 'conn-name';
+      name.textContent = dir.split(/[\\/]/).filter(Boolean).pop();
+      const path = document.createElement('div'); path.className = 'conn-meta'; path.textContent = dir;
+      left.appendChild(name); left.appendChild(path);
+      const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.gap = '6px';
+      const open = document.createElement('button'); open.className = 'conn-btn off'; open.textContent = 'Ouvrir';
+      open.onclick = () => desktop.openFolder(dir);
+      const del = document.createElement('button'); del.className = 'conn-btn off'; del.textContent = 'Retirer';
+      del.onclick = async () => { await desktop.removeFolder(dir); await renderFolders(); };
+      wrap.appendChild(open); wrap.appendChild(del);
+      row.appendChild(left); row.appendChild(wrap);
+      list.appendChild(row);
+    }
+  }
+
+  if (desktop) {
+    $('foldersBtn').hidden = false;
+    $('foldersBtn').addEventListener('click', async () => {
+      $('foldersOverlay').hidden = false; await renderFolders();
+      folderNote().textContent = 'Synchronisation…'; await syncAll(false);
+    });
+    $('foldersClose').addEventListener('click', () => { $('foldersOverlay').hidden = true; });
+    $('foldersOverlay').addEventListener('click', (e) => { if (e.target === $('foldersOverlay')) $('foldersOverlay').hidden = true; });
+    $('addFolderBtn').addEventListener('click', async () => {
+      const dir = await desktop.pickFolder();
+      if (!dir) return;
+      await renderFolders();
+      folderNote().textContent = 'Synchronisation du nouveau dossier…';
+      await syncAll(false);
+    });
+    desktop.onMenuPickFolder(async () => { $('foldersOverlay').hidden = false; await renderFolders(); });
+    // Synchro au démarrage, puis régulièrement en arrière-plan.
+    setTimeout(() => syncAll(true), 4000);
+    setInterval(() => syncAll(true), 90000);
+  }
+
   // ── Connexions : coffre par utilisateur (Google mail/agenda/drive, etc.) ──
   const connOverlay = $('connOverlay'), connList = $('connList'), connNote = $('connNote');
 
@@ -958,6 +1102,9 @@
       const reply = clean(spoken);
       addLine('ai', reply);
       speak(reply, resumeIfConversing);   // quand il a fini de parler, il se remet à écouter
+      // VindIA vient peut-être de déposer un fichier : on le rapatrie sans attendre
+      // le prochain cycle de synchronisation.
+      if (window.vindiaDesktop) setTimeout(() => syncAll(true), 1500);
     } catch (e) {
       errEl.textContent = "Problème de connexion : " + (e.message || e);
       setState('idle', 'Prêt');

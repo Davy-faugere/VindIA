@@ -167,6 +167,7 @@
     </div>
 
     <div class="actions">
+      <button id="englishBtn" class="switch" type="button">Cours d'anglais</button>
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
       <button id="connectionsBtn" class="switch" type="button" hidden>Connexions</button>
@@ -273,6 +274,9 @@
   }
 
   let _displayName = '', _isAdmin = false;
+  // Mode « cours d'anglais » : conversation en anglais, corrections expliquées en français.
+  // Mémorisé sur l'appareil pour survivre à un rechargement.
+  let englishMode = localStorage.getItem('vindia_english') === '1';
   async function resolveIdentity() {
     try {
       const r = await fetch('/auth', { method: 'POST', headers: await authHeaders() });
@@ -289,6 +293,7 @@
         $('filesBtn').hidden = _isAdmin;
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
+        if (englishMode) applyEnglishMode();   // restaure le cours d'anglais après rechargement
         hideLogin(); pendingScreen.hidden = true;
         return true;
       }
@@ -608,6 +613,32 @@
   $('memClose').addEventListener('click', () => { memOverlay.hidden = true; });
   memOverlay.addEventListener('click', (e) => { if (e.target === memOverlay) memOverlay.hidden = true; });
 
+  // ── Cours d'anglais : VindIA devient professeur (conversation EN, corrections FR) ──
+  function applyEnglishMode() {
+    const b = $('englishBtn');
+    b.textContent = englishMode ? "Quitter le cours d'anglais" : "Cours d'anglais";
+    b.style.color = englishMode ? 'var(--primary)' : '';
+    b.style.fontWeight = englishMode ? '700' : '';
+    if (recog) recog.lang = englishMode ? 'en-US' : 'fr-FR';   // dictée dans la bonne langue
+    if (englishMode) {
+      sub.textContent = 'English lesson — parle en anglais, je corrige';
+      hint.textContent = "Réponds en anglais. Je corrige tes phrases et j'explique en français.";
+    } else {
+      sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
+      hint.textContent = "Appuie une fois, puis parle librement — VindIA t'écoute et te répond en continu.";
+    }
+  }
+
+  $('englishBtn').addEventListener('click', () => {
+    if (conversing) stopConversation();
+    englishMode = !englishMode;
+    localStorage.setItem('vindia_english', englishMode ? '1' : '');
+    applyEnglishMode();
+    if (englishMode) {
+      addLine('ai', "Cours d'anglais activé. Dis-moi bonjour en anglais pour commencer.");
+    }
+  });
+
   // ── Fichiers du projet actif : voir + télécharger (y compris ce que VindIA crée) ──
   const filesOverlay = $('filesOverlay'), filesList = $('filesList'), filesNote = $('filesNote');
 
@@ -730,7 +761,12 @@
   }
 
   function ttsUrl(text) {
-    return fetch('/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+    // En cours d'anglais : voix anglaise native, multilingue (elle prononce aussi
+    // correctement les explications en français).
+    const body = englishMode
+      ? { text, voice: 'en-US-AvaMultilingualNeural', rate: '-4%' }
+      : { text };
+    return fetch('/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(r => { if (!r.ok) throw new Error('tts ' + r.status); return r.blob(); })
       .then(b => URL.createObjectURL(b));
   }
@@ -789,7 +825,7 @@
     try {
       const r = await fetch('/ask', {
         method: 'POST', headers: await authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ message, project_id: projSelect.value || '' })
+        body: JSON.stringify({ message, project_id: projSelect.value || '', mode: englishMode ? 'english' : '' })
       });
       if (r.status === 401) { showLogin(); throw new Error("session expirée, reconnecte-toi"); }
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -867,7 +903,8 @@
 
   if (SR) {
     recog = new SR();
-    recog.lang = 'fr-FR'; recog.continuous = true; recog.interimResults = true; recog.maxAlternatives = 1;
+    recog.lang = englishMode ? 'en-US' : 'fr-FR';
+    recog.continuous = true; recog.interimResults = true; recog.maxAlternatives = 1;
     recog.onresult = (ev) => {
       if (phase !== 'listening') return;
       let interim = '';

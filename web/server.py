@@ -37,6 +37,7 @@ from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
 from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
+from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
 from shared.agent.synced_tools import build_synced_tools
 from shared.agent.transcribe_tools import build_transcribe_tool
 
@@ -334,6 +335,14 @@ async def ask(request: web.Request) -> web.Response:
         return web.json_response({"error": "trop de requêtes, réessaie dans une heure"}, status=429)
     if _llm is None:
         return web.json_response({"error": "LLM non initialisé"}, status=503)
+    # Mode de conversation. « english » = professeur d'anglais : prompt dédié qui REMPLACE
+    # le prompt par défaut (lequel impose de répondre en français). Historique de session
+    # séparé pour ne pas mélanger les deux conversations.
+    mode = (data.get("mode") or "").strip().lower()
+    system_override = ENGLISH_TUTOR_PROMPT if mode == "english" else None
+    # Clé d'historique distincte du member_id : celui-ci reste l'identifiant d'isolation
+    # (projets, fichiers, mémoire) et ne doit JAMAIS être altéré.
+    session_key = f"{member_id}#en" if mode == "english" else member_id
     # Outils de session : projet actif (lire/écrire, scopé membre+projet) + VPS si admin.
     # Le projet actif vient du corps de la requête (la page l'envoie à chaque message) —
     # robuste aux redémarrages ; à défaut, on retombe sur l'état mémoire _active_project.
@@ -357,7 +366,11 @@ async def ask(request: web.Request) -> web.Response:
     timeout = 60.0 if (getattr(_llm, "_tools", None) or extra_tools) else 30.0
     try:
         reply = await asyncio.wait_for(
-            _llm.reply(message, session_id=member_id, extra_tools=extra_tools), timeout=timeout
+            _llm.reply(
+                message, session_id=session_key, extra_tools=extra_tools,
+                system_override=system_override,
+            ),
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         return web.json_response({"error": "délai dépassé, réessaie"}, status=504)

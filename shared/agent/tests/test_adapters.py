@@ -57,6 +57,43 @@ class MistralLLMTest(unittest.TestCase):
         self.assertEqual(captured["messages"][0]["content"], VINDIA_SYSTEM_PROMPT)
         self.assertEqual(captured["messages"][-1], {"role": "user", "content": "bonjour"})
 
+    def test_system_override_replaces_base_prompt(self):
+        # Mode professeur d'anglais : le prompt par défaut (« toujours en français »)
+        # doit être REMPLACÉ, sinon l'agent ne pourrait pas parler anglais.
+        from shared.agent.adapters import ENGLISH_TUTOR_PROMPT, VINDIA_SYSTEM_PROMPT
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        llm = MistralLLM(transport=fake)
+        asyncio.run(llm.reply("hello", session_id="s1", system_override=ENGLISH_TUTOR_PROMPT))
+        system = captured["messages"][0]["content"]
+        self.assertIn("English tutor", system)
+        self.assertNotIn(VINDIA_SYSTEM_PROMPT, system)
+
+    def test_memory_still_injected_with_override(self):
+        # La mémoire long-terme reste jointe : le tuteur sait à qui il parle.
+        from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        llm = MistralLLM(transport=fake)
+        llm.load_memory("s1", "[Mémoire]\n- travaille dans l'industrie")
+        asyncio.run(llm.reply("hi", session_id="s1", system_override=ENGLISH_TUTOR_PROMPT))
+        system = captured["messages"][0]["content"]
+        self.assertIn("English tutor", system)
+        self.assertIn("[Mémoire]", system)
+
+    def test_english_tutor_prompt_defines_correction_format(self):
+        from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+        self.assertIn("CORRECTION :", ENGLISH_TUTOR_PROMPT)
+        self.assertIn("POURQUOI :", ENGLISH_TUTOR_PROMPT)
+
     def test_system_prompt_instructs_file_creation(self):
         # VindIA doit savoir produire un document téléchargeable via [[FICHIER:…]].
         from shared.agent.adapters import VINDIA_SYSTEM_PROMPT

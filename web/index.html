@@ -124,6 +124,11 @@
   .login-card button{padding:12px; border:none; border-radius:12px; background:var(--primary); color:#fff; font:inherit; font-weight:700; font-size:15px; cursor:pointer}
   .login-card button:active{background:var(--primary-hover)}
   .login-err{color:#b91c1c; font-size:13px; min-height:18px; margin:0}
+  .pw{height:5px; background:#e9ecf3; border-radius:3px; overflow:hidden; margin:-4px 0 0}
+  .pw[hidden]{display:none}
+  .pw span{display:block; height:100%; width:0; border-radius:3px; transition:width .25s, background .25s}
+  .pw-hint{font-size:11.5px; color:var(--muted); margin:0; text-align:left; line-height:1.45}
+  .pw-hint[hidden]{display:none}
 </style>
 </head>
 <body data-state="idle">
@@ -231,9 +236,24 @@
       <p class="sub" id="loginSub">Connecte-toi pour continuer</p>
       <input id="loginEmail" type="email" placeholder="Adresse e-mail" autocomplete="username" required />
       <input id="loginPass" type="password" placeholder="Mot de passe" autocomplete="current-password" required />
+      <div id="pwMeter" class="pw" hidden><span id="pwBar"></span></div>
+      <p id="pwHint" class="pw-hint" hidden>12 caractères minimum, avec au moins une majuscule, un chiffre et un caractère spécial.</p>
       <button id="loginBtn" type="submit">Se connecter</button>
       <p class="login-err" id="loginErr"></p>
       <button id="loginToggle" type="button" class="switch" style="margin-top:6px">Pas de compte ? Créer un compte</button>
+      <button id="forgotBtn" type="button" class="switch" style="margin-top:2px">Mot de passe oublié ?</button>
+    </form>
+  </div>
+
+  <div class="login" id="resetScreen" hidden>
+    <form class="login-card" id="resetForm">
+      <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
+      <p class="sub">Choisis un nouveau mot de passe</p>
+      <input id="newPass" type="password" placeholder="Nouveau mot de passe" autocomplete="new-password" required />
+      <div class="pw"><span id="newPwBar"></span></div>
+      <p class="pw-hint">12 caractères minimum, avec au moins une majuscule, un chiffre et un caractère spécial.</p>
+      <button id="newPassBtn" type="submit">Enregistrer le mot de passe</button>
+      <p class="login-err" id="resetErr"></p>
     </form>
   </div>
 
@@ -262,7 +282,11 @@
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
   const loginScreen = $('loginScreen'), pendingScreen = $('pendingScreen');
-  function showLogin() { pendingScreen.hidden = true; loginScreen.hidden = false; }
+  function showLogin() {
+    pendingScreen.hidden = true;
+    const rs = document.getElementById('resetScreen'); if (rs) rs.hidden = true;
+    loginScreen.hidden = false;
+  }
   function hideLogin() { loginScreen.hidden = true; }
   function showPending() { loginScreen.hidden = true; pendingScreen.hidden = false; }
 
@@ -301,14 +325,74 @@
     return false;
   }
 
+  // ── Robustesse du mot de passe ────────────────────────────────────────────
+  // Exigences appliquées à la CRÉATION et au CHANGEMENT de mot de passe.
+  function pwScore(p) {
+    let s = 0;
+    if (p.length >= 12) s++;
+    if (p.length >= 16) s++;
+    if (/[A-Z]/.test(p) && /[a-z]/.test(p)) s++;
+    if (/[0-9]/.test(p)) s++;
+    if (/[^A-Za-z0-9]/.test(p)) s++;
+    return s;                                   // 0 à 5
+  }
+  function pwValid(p) {
+    return p.length >= 12 && /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p);
+  }
+  function paintMeter(bar, p) {
+    const s = pwScore(p), pct = [0, 20, 40, 60, 80, 100][s];
+    const col = s <= 2 ? '#dc2626' : (s === 3 ? '#d97706' : (s === 4 ? '#65a30d' : '#15803d'));
+    bar.style.width = pct + '%'; bar.style.background = col;
+  }
+
   // Formulaire login / inscription (bascule via le lien).
   let _signupMode = false;
-  $('loginToggle').addEventListener('click', () => {
-    _signupMode = !_signupMode;
-    $('loginBtn').textContent = _signupMode ? 'Créer mon compte' : 'Se connecter';
-    $('loginSub').textContent = _signupMode ? 'Crée ton compte' : 'Connecte-toi pour continuer';
-    $('loginToggle').textContent = _signupMode ? "J'ai déjà un compte" : 'Pas de compte ? Créer un compte';
-    $('loginErr').textContent = '';
+  function setSignupMode(on) {
+    _signupMode = on;
+    $('loginBtn').textContent = on ? 'Créer mon compte' : 'Se connecter';
+    $('loginSub').textContent = on ? 'Crée ton compte' : 'Connecte-toi pour continuer';
+    $('loginToggle').textContent = on ? "J'ai déjà un compte" : 'Pas de compte ? Créer un compte';
+    $('loginPass').setAttribute('autocomplete', on ? 'new-password' : 'current-password');
+    $('pwMeter').hidden = !on; $('pwHint').hidden = !on;   // exigences visibles à l'inscription
+    $('loginErr').textContent = ''; $('loginErr').style.color = '';
+  }
+  $('loginToggle').addEventListener('click', () => setSignupMode(!_signupMode));
+  $('loginPass').addEventListener('input', () => {
+    if (_signupMode) paintMeter($('pwBar'), $('loginPass').value);
+  });
+
+  // Mot de passe oublié : Supabase envoie un lien de réinitialisation par e-mail.
+  $('forgotBtn').addEventListener('click', async () => {
+    const email = $('loginEmail').value.trim(), err = $('loginErr');
+    if (!email) { err.style.color = ''; err.textContent = "Saisis d'abord ton adresse e-mail."; return; }
+    const b = $('forgotBtn'); b.disabled = true; b.textContent = 'Envoi…';
+    try {
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/' });
+      err.style.color = error ? '' : '#15803d';
+      err.textContent = error
+        ? "Envoi impossible : " + (error.message || '')
+        : "E-mail envoyé. Clique le lien reçu pour choisir un nouveau mot de passe.";
+    } catch (e) { err.textContent = "Envoi impossible, réessaie."; }
+    finally { b.disabled = false; b.textContent = 'Mot de passe oublié ?'; }
+  });
+
+  // Écran « nouveau mot de passe » (après clic sur le lien reçu par e-mail).
+  $('newPass').addEventListener('input', () => paintMeter($('newPwBar'), $('newPass').value));
+  $('resetForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const p = $('newPass').value, err = $('resetErr'), b = $('newPassBtn');
+    if (!pwValid(p)) { err.style.color = ''; err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial."; return; }
+    err.textContent = ''; b.disabled = true; b.textContent = '…';
+    try {
+      const { error } = await sb.auth.updateUser({ password: p });
+      if (error) { err.textContent = "Échec : " + (error.message || ''); }
+      else {
+        $('resetScreen').hidden = true; $('newPass').value = '';
+        history.replaceState(null, '', location.pathname);
+        await resolveIdentity();
+      }
+    } catch (e) { err.textContent = "Échec, réessaie."; }
+    finally { b.disabled = false; b.textContent = 'Enregistrer le mot de passe'; }
   });
 
   $('loginForm').addEventListener('submit', async (e) => {
@@ -318,13 +402,17 @@
     err.textContent = ''; btn.disabled = true; btn.textContent = '…';
     try {
       if (_signupMode) {
+        if (!pwValid(pass)) {
+          err.style.color = '';
+          err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial.";
+          return;
+        }
         const { error } = await sb.auth.signUp({ email, password: pass });
         if (error) { err.textContent = 'Inscription impossible : ' + (error.message || ''); }
         else {
           err.style.color = '#15803d';
           err.textContent = "Compte créé ! Vérifie tes e-mails pour confirmer, puis connecte-toi.";
-          _signupMode = false; $('loginSub').textContent = 'Connecte-toi pour continuer';
-          $('loginToggle').textContent = 'Pas de compte ? Créer un compte';
+          setSignupMode(false);
         }
       } else {
         const { error } = await sb.auth.signInWithPassword({ email, password: pass });
@@ -337,9 +425,21 @@
 
   $('pendingLogout').addEventListener('click', async () => { await sb.auth.signOut(); showLogin(); });
 
+  // Retour depuis le lien de réinitialisation reçu par e-mail : Supabase place
+  // « type=recovery » dans l'URL et ouvre une session temporaire → on demande
+  // directement le nouveau mot de passe.
+  const _isRecovery = /type=recovery/.test(location.hash) || /type=recovery/.test(location.search);
+  sb.auth.onAuthStateChange((event) => {
+    if (event === 'PASSWORD_RECOVERY') {
+      loginScreen.hidden = true; pendingScreen.hidden = true;
+      $('resetScreen').hidden = false;
+    }
+  });
+
   // Au démarrage : session existante → on entre ; sinon → écran de login.
   (async () => {
     const { data } = await sb.auth.getSession();
+    if (_isRecovery) { $('resetScreen').hidden = false; return; }
     if (data.session) { await resolveIdentity(); } else { showLogin(); }
   })();
 

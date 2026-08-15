@@ -129,12 +129,25 @@
   .pw span{display:block; height:100%; width:0; border-radius:3px; transition:width .25s, background .25s}
   .pw-hint{font-size:11.5px; color:var(--muted); margin:0; text-align:left; line-height:1.45}
   .pw-hint[hidden]{display:none}
+  /* Transparence IA — AI Act art. 50 : visible dès la première interaction. */
+  .ai-notice{
+    font-size:12.5px; line-height:1.5; color:var(--text); text-align:left;
+    background:var(--soft); border:1px solid #dcd9f7; border-left:3px solid var(--accent);
+    border-radius:8px; padding:10px 12px; margin:2px 0 4px;
+  }
+  .ai-notice b{color:var(--primary)}
+  .ai-badge{
+    display:inline-flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted);
+    border:1px solid #e5e7eb; border-radius:999px; padding:3px 10px; margin-top:10px;
+  }
+  .ai-badge i{width:6px; height:6px; border-radius:50%; background:var(--accent); font-style:normal}
 </style>
 </head>
 <body data-state="idle">
   <main class="card">
     <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
     <p class="sub" id="sub">Assistant vocal — en français</p>
+    <span class="ai-badge" title="Conformément au règlement européen sur l'IA (AI Act, art. 50)"><i></i>Assistant propulsé par IA — les réponses peuvent contenir des erreurs</span>
 
     <div class="orb-wrap">
       <span class="ring"></span>
@@ -233,6 +246,7 @@
   <div class="login" id="loginScreen" hidden>
     <form class="login-card" id="loginForm">
       <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
+      <p class="ai-notice">VindIA est un assistant <b>propulsé par intelligence artificielle</b>. Tu échanges avec une IA, pas avec une personne. Ses réponses peuvent comporter des erreurs : vérifie les informations importantes.</p>
       <p class="sub" id="loginSub">Connecte-toi pour continuer</p>
       <input id="loginEmail" type="email" placeholder="Adresse e-mail" autocomplete="username" required />
       <input id="loginPass" type="password" placeholder="Mot de passe" autocomplete="current-password" required />

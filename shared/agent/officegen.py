@@ -27,6 +27,21 @@ _ACCENT = (79, 70, 229)
 # Images : insérées via « ![alt](nom) » si le fichier existe sous base_dir.
 _IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
+# Transparence IA — AI Act art. 50(2) : tout contenu généré doit être identifiable
+# comme tel. Mention lisible par un humain + métadonnées lisibles par une machine.
+AI_NOTICE = "Document généré par intelligence artificielle (VindIA) — à vérifier avant usage."
+AI_META = "AI-generated content (VindIA) — EU AI Act art. 50"
+
+
+def _tag_office_meta(props) -> None:
+    """Marque les propriétés d'un document Office comme contenu généré par IA."""
+    try:
+        props.comments = AI_META
+        props.category = "AI-generated"
+        props.author = "VindIA (IA)"
+    except Exception:
+        pass
+
 
 def _safe_image(base_dir, rel: str):
     """Chemin absolu d'une image SOUS base_dir (anti path-traversal), ou None."""
@@ -153,6 +168,17 @@ def _build_docx(content: str, base_dir=None) -> bytes:
                 doc.add_paragraph(f"[image introuvable : {alt or rel}]")
         else:
             _docx_runs(doc.add_paragraph(), data)
+    # Transparence IA (AI Act art. 50) : mention visible + métadonnées machine.
+    note = doc.add_paragraph()
+    run = note.add_run(AI_NOTICE)
+    run.italic = True
+    try:
+        from docx.shared import Pt
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+    except Exception:
+        pass
+    _tag_office_meta(doc.core_properties)
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -215,6 +241,16 @@ def _build_xlsx(content: str, base_dir=None) -> bytes:
         for c in range(1, max(len(r) for r in rows) + 1):
             width = max((len(str(row[c - 1])) for row in rows if len(row) >= c), default=10)
             ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = min(max(width + 2, 10), 60)
+    # Transparence IA (AI Act art. 50).
+    last = ws.max_row + 2
+    cell = ws.cell(row=last, column=1, value=AI_NOTICE)
+    cell.font = Font(italic=True, size=8, color="777777")
+    try:
+        wb.properties.creator = "VindIA (IA)"
+        wb.properties.description = AI_META
+        wb.properties.category = "AI-generated"
+    except Exception:
+        pass
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -243,6 +279,7 @@ def _build_pptx(content: str, base_dir=None) -> bytes:
             p.text = txt
             p.font.size = Pt(18)
             first = False
+    _tag_office_meta(prs.core_properties)   # transparence IA (AI Act art. 50)
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
@@ -291,6 +328,19 @@ def _build_pdf(content: str, base_dir=None) -> bytes:
                 _pdf_line(pdf, f"[image introuvable : {alt or rel}]")
         else:
             _pdf_line(pdf, data)
+    # Transparence IA (AI Act art. 50) : mention visible + métadonnées machine.
+    pdf.ln(4)
+    pdf.set_font("DejaVu", "", 8)
+    pdf.set_text_color(120, 120, 120)
+    pdf.multi_cell(pdf.epw, 4, AI_NOTICE, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    try:
+        pdf.set_author("VindIA (IA)")
+        pdf.set_creator("VindIA — AI-generated")
+        pdf.set_subject(AI_META)
+        pdf.set_keywords("AI-generated, VindIA, EU AI Act art.50")
+    except Exception:
+        pass
     return bytes(pdf.output())
 
 

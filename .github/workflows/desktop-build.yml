@@ -7,10 +7,14 @@ name: Application Windows
 # - Sur un tag « desktop-v* » : il est en plus publié dans une Release GitHub.
 
 on:
-  push:
-    paths: ['desktop/**', '.github/workflows/desktop-build.yml']
-    tags: ['desktop-v*']
+  # Lancement manuel depuis l'onglet Actions (le plus courant).
   workflow_dispatch:
+  # Tag « desktop-v… » : construit ET publie la Release.
+  push:
+    tags: ['desktop-v*']
+  # Vérifie que l'application compile encore quand on la modifie.
+  pull_request:
+    paths: ['desktop/**', '.github/workflows/desktop-build.yml']
 
 permissions:
   contents: write

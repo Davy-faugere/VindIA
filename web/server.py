@@ -116,6 +116,21 @@ def _check_rate(code: str) -> bool:
     return True
 
 
+_STT_LIMIT = 900          # transcriptions par heure et par membre (aperçus compris)
+_stt_buckets: dict = defaultdict(list)
+
+
+def _check_rate_stt(member_id: str) -> bool:
+    now = time.monotonic()
+    bucket = [t for t in _stt_buckets[member_id] if now - t < _RATE_WINDOW]
+    if len(bucket) >= _STT_LIMIT:
+        _stt_buckets[member_id] = bucket
+        return False
+    bucket.append(now)
+    _stt_buckets[member_id] = bucket
+    return True
+
+
 def _init_services() -> None:
     global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync, _skills
     if _llm is not None:
@@ -544,8 +559,11 @@ async def stt(request: web.Request) -> web.Response:
     ident, err = await _require_approved(request)
     if err:
         return err
-    if not _check_rate(ident["member_id"]):
-        return web.json_response({"error": "trop de requêtes"}, status=429)
+    # Limite DÉDIÉE : l'aperçu au fil de la parole appelle cet endpoint toutes les
+    # quelques secondes. Le quota conversationnel (60/h) serait épuisé en quelques
+    # messages — ce qui couperait le micro sans raison apparente.
+    if not _check_rate_stt(ident["member_id"]):
+        return web.json_response({"error": "trop de transcriptions, patiente un peu"}, status=429)
     data = await request.read()
     if not data:
         return web.json_response({"error": "audio vide"}, status=400)

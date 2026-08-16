@@ -225,7 +225,7 @@
     <div class="err" id="err"></div>
 
     <div class="pending" id="pending">
-      <div class="pending-text" id="pendingText"></div>
+      <div class="pending-text" id="pendingText" contenteditable="true" spellcheck="true"></div>
       <div class="pending-actions">
         <button id="cancelBtn" class="pbtn cancel">Annuler</button>
         <button id="sendNowBtn" class="pbtn send">Envoyer</button>
@@ -1493,7 +1493,7 @@
         pendingFill = $('pendingFill'), cancelBtn = $('cancelBtn'), sendNowBtn = $('sendNowBtn');
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const SILENCE_MS = 2500;   // silence requis avant de proposer l'envoi (généreux : ne coupe pas aux pauses)
-  const CONFIRM_MS = 4500;   // fenêtre pour annuler/corriger avant l'envoi automatique
+  const CONFIRM_MS = 10000;  // fenêtre pour relire, corriger et annuler avant l'envoi
   let recog = null, finalBuf = '', silenceTimer = null, confirmTimer = null, phase = 'idle';
   // Segments définitifs de la session de reconnaissance EN COURS, indexés par leur
   // position. Sur mobile le navigateur coupe et relance sans cesse la reconnaissance :
@@ -1513,8 +1513,6 @@
   // Ce que le micro est en train de capter : le message lui-même, ou la réponse à
   // « je t'envoie ça ? ». La même mécanique d'enregistrement sert aux deux.
   let micRole = 'message';
-  let relectureTimer = null, decompteTimer = null;
-  const RELECTURE_S = 10;        // délai de relecture avant la demande vocale
   // Silence au-delà duquel on considère que la personne a fini. Long quand elle
   // DICTE (on réfléchit en parlant, une pause ne doit pas couper la phrase), court
   // quand elle répond juste « oui » ou « non ».
@@ -1548,10 +1546,6 @@
   }
 
   function stopSurveillance() { clearInterval(silenceTick); silenceTick = null; }
-  function stopRelecture() {
-    clearTimeout(relectureTimer); clearInterval(decompteTimer);
-    relectureTimer = decompteTimer = null;
-  }
 
   async function startEnregistrement(role) {
     micRole = role || 'message';
@@ -1560,13 +1554,21 @@
       morceaux = [];
       mediaRec = new MediaRecorder(micStream);
       mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) morceaux.push(e.data); };
-      mediaRec.start();
+      // Morceaux d'une seconde : indispensable pour transcrire au fil de la parole
+      // (sans timeslice, l'audio n'est disponible qu'à l'arrêt).
+      mediaRec.start(1000);
       phase = 'listening';
       setState('listening', '<span class="live">À l\'écoute…</span>');
       hint.textContent = micRole === 'confirmation'
         ? "Dis « oui » pour envoyer, ou continue à parler pour compléter."
-        : "Parle tranquillement, prends tes pauses. Appuie sur « Envoyer » quand tu as fini.";
-      orb.textContent = 'Envoyer';
+        : "Parle tranquillement, prends tes pauses. Le texte s'affiche au fur et à mesure.";
+      orb.textContent = 'Arrêter';
+      if (micRole === 'message') {
+        pendingText.textContent = '';
+        pending.classList.add('show');
+        pendingFill.classList.remove('run');
+        demarrerApercu();
+      }
       surveillerFinDeParole(micStream, () => envoyerEnregistrement(),
                             FIN_PAROLE_MS[micRole] || FIN_PAROLE_MS.message);
     } catch (e) {
@@ -1575,14 +1577,35 @@
     }
   }
 
+  // Aperçu pendant la parole. On renvoie l'audio complet depuis le début (et non
+  // la seule tranche nouvelle) : découper au milieu d'un mot dégraderait la
+  // transcription. Le texte affiché est donc remplacé, jamais concaténé.
+  let apercuTimer = null, apercuEnCours = false;
+
+  function demarrerApercu() {
+    clearInterval(apercuTimer);
+    apercuTimer = setInterval(async () => {
+      if (apercuEnCours || phase !== 'listening' || morceaux.length < 2) return;
+      apercuEnCours = true;
+      try {
+        const blob = new Blob(morceaux.slice(), { type: mediaRec.mimeType || 'audio/webm' });
+        const r = await fetch('/stt', { method: 'POST', headers: await authHeaders(), body: blob });
+        const d = await r.json();
+        if (d.text && phase === 'listening') pendingText.textContent = d.text;
+      } catch (e) { /* un aperçu raté n'interrompt rien */ }
+      apercuEnCours = false;
+    }, 4000);
+  }
+
+  function stopApercu() { clearInterval(apercuTimer); apercuTimer = null; }
+
   async function envoyerEnregistrement() {
     if (!mediaRec || mediaRec.state === 'inactive') return;
-    stopSurveillance();
+    stopSurveillance(); stopApercu();
     const fini = new Promise((res) => { mediaRec.onstop = res; });
     mediaRec.stop();
     await fini;
     const blob = new Blob(morceaux, { type: mediaRec.mimeType || 'audio/webm' });
-    orb.textContent = 'Arrêter';
     if (blob.size < 1500) {
       errEl.textContent = "Je n'ai rien entendu.";
       if (conversing) startEnregistrement(micRole);
@@ -1598,36 +1621,15 @@
         return;
       }
       if (micRole === 'confirmation') traiterConfirmation(d.text);
-      else ouvrirRelecture(d.text);
+      else enterConfirm(d.text);          // texte + barre dégressive, comme avant
     } catch (e) {
       errEl.textContent = e.message;
       if (conversing) startEnregistrement(micRole);
     }
   }
 
-  // -- relecture : 10 s pour corriger, puis demande vocale --------------------
-  function ouvrirRelecture(texte, ajouter) {
-    textInput.value = ajouter && textInput.value
-      ? (textInput.value.trim() + ' ' + texte).replace(/\s+/g, ' ')
-      : texte;
-    textInput.focus();
-    textInput.setSelectionRange(textInput.value.length, textInput.value.length);
-    phase = 'relecture';
-    orb.textContent = 'Envoyer';
-    let reste = RELECTURE_S;
-    const afficher = () => {
-      setState('idle', 'À relire');
-      hint.textContent = "Corrige si besoin. Je te demande confirmation dans " + reste + " s.";
-    };
-    afficher();
-    stopRelecture();
-    decompteTimer = setInterval(() => { reste--; if (reste >= 0) afficher(); }, 1000);
-    relectureTimer = setTimeout(demanderConfirmation, RELECTURE_S * 1000);
-  }
-
   function demanderConfirmation() {
-    stopRelecture();
-    if (!textInput.value.trim()) { setState('idle', 'Prêt'); return; }
+    if (!pendingText.textContent.trim()) { setState('idle', 'Prêt'); return; }
     phase = 'confirmation';
     setState('speaking', 'Je te demande confirmation');
     // On parle, PUIS on écoute : sans ce chaînage, le micro capterait la question.
@@ -1640,20 +1642,16 @@
   const DIT_NON = /\b(non|nan|annule|attends|attend|stop|pas encore)\b/i;
 
   function traiterConfirmation(reponse) {
-    if (DIT_OUI.test(reponse)) {
-      const txt = textInput.value.trim();
-      textInput.value = '';
-      phase = 'sending';
-      if (txt) ask(txt); else resumeIfConversing();
-      return;
-    }
+    if (DIT_OUI.test(reponse)) { confirmSend(); return; }
     // Tout ce qui n'est pas « oui » relance l'enregistrement. Un simple refus ne
     // doit pas atterrir dans le message ; le reste est pris comme un complément.
     if (DIT_NON.test(reponse)) {
       hint.textContent = "D'accord, je continue à t'écouter.";
       startEnregistrement('message');
     } else {
-      ouvrirRelecture(reponse, true);   // complète le message, puis re-décompte
+      // Ni oui ni non : c'est un complément. On l'ajoute et on relance le décompte.
+      const cumul = (pendingText.textContent.trim() + ' ' + reponse).replace(/\s+/g, ' ').trim();
+      enterConfirm(cumul);
     }
   }
 
@@ -1683,15 +1681,26 @@
 
   function enterConfirm(txt) {
     phase = 'confirm';
-    try { recog.stop(); } catch (e) {}
+    if (recog) { try { recog.stop(); } catch (e) {} }
     setState('idle', 'À vérifier');
     pendingText.textContent = txt;
     pending.classList.add('show');
-    hint.textContent = "J'envoie dans un instant — tu peux annuler et recommencer.";
+    hint.textContent = "Relis et corrige directement le texte si besoin. Tu peux annuler ou envoyer.";
     pendingFill.classList.remove('run'); void pendingFill.offsetWidth; pendingFill.classList.add('run');
     clearTimeout(confirmTimer);
-    confirmTimer = setTimeout(confirmSend, CONFIRM_MS);
+    // En transcription serveur, la fin du compte à rebours DEMANDE confirmation à
+    // voix haute au lieu d'envoyer directement.
+    confirmTimer = setTimeout(sttServeur ? demanderConfirmation : confirmSend, CONFIRM_MS);
   }
+
+  // Corriger le texte suspend le compte à rebours : sinon l'envoi tomberait au
+  // milieu de la frappe.
+  pendingText.addEventListener('input', () => {
+    if (phase !== 'confirm') return;
+    clearTimeout(confirmTimer); confirmTimer = null;
+    pendingFill.classList.remove('run');
+    hint.textContent = "Appuie sur Envoyer quand c'est bon.";
+  });
 
   function confirmSend() {
     const txt = pendingText.textContent.trim();
@@ -1700,7 +1709,8 @@
   }
 
   function cancelPending() {
-    clearTimers(); hidePending();
+    clearTimers(); hidePending(); stopApercu(); stopSurveillance();
+    if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (e) {} }
     if (conversing) startListening();
     else { phase = 'idle'; setState('idle', 'Prêt'); hint.textContent = "Appuie pour reprendre."; }
   }
@@ -1763,7 +1773,9 @@
     speakToken++;   // invalide toute lecture vocale en cours (y compris entre deux phrases)
     if (recog) { try { recog.abort(); } catch (e) {} }
     if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (e) {} }
-    stopSurveillance(); stopRelecture();
+    stopSurveillance(); stopApercu();
+    micRole = 'message';
+    orb.textContent = 'Démarrer';
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix en cours
     setState('idle', 'Prêt');
@@ -1773,8 +1785,6 @@
   orb.addEventListener('click', () => {
     errEl.textContent = '';
     if (!recog && !sttServeur) { textInput.focus(); return; }
-    if (sttServeur && conversing && phase === 'listening') { envoyerEnregistrement(); return; }
-    if (sttServeur && phase === 'relecture') { stopRelecture(); envoyerTexteSaisi(); return; }
     conversing ? stopConversation() : startConversation();
   });
 
@@ -1795,14 +1805,11 @@
   // PWA : enregistrement du service worker (installable comme une app)
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
-  const envoyerTexteSaisi = () => sendText();
-
   function sendText() {
     const m = textInput.value.trim();
     if (!m) return;
     textInput.value = '';
     clearTimers(); hidePending();
-    stopRelecture();          // un envoi manuel annule la demande de confirmation
     if (recog) { try { recog.abort(); } catch (e) {} }
     if (phase === 'listening' || phase === 'confirm') phase = 'sending';
     ask(m);
@@ -1811,12 +1818,6 @@
   textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
   // Dès qu'il corrige, on n'interrompt plus : la question vocale attendrait sinon
   // au milieu de sa frappe.
-  textInput.addEventListener('input', () => {
-    if (phase === 'relecture') {
-      stopRelecture();
-      hint.textContent = "Appuie sur Envoyer quand c'est bon.";
-    }
-  });
 })();
 </script>
 </body>

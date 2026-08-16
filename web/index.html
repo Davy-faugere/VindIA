@@ -167,7 +167,13 @@
     border:1.5px solid var(--accent); border-radius:14px; padding:13px 15px;
     box-shadow:0 8px 22px rgba(139,92,246,.16)}
   .pending.show{display:block}
-  .pending-text{font-size:15px; line-height:1.5; color:var(--text); min-height:21px; margin-bottom:11px}
+    /* Hauteur FIXE : la zone se remplit au fil de la transcription. Sans hauteur
+     figée, elle grandissait à chaque mise à jour et faisait sauter toute la page
+     (l'orbe et les boutons se déplaçaient sous le curseur). Le texte défile
+     à l'intérieur. */
+  .pending-text{font-size:15px; line-height:1.5; color:var(--text); margin-bottom:11px;
+    height:4.5em; overflow-y:auto; outline:none}
+  .pending-text:focus{color:var(--text)}
   .pending-text:empty::before{content:'…'; color:var(--muted)}
   .pending-actions{display:flex; gap:8px}
   .pbtn{flex:1; padding:11px; border:none; border-radius:11px; font:inherit; font-size:14px; font-weight:700; cursor:pointer}
@@ -1591,7 +1597,10 @@
         const blob = new Blob(morceaux.slice(), { type: mediaRec.mimeType || 'audio/webm' });
         const r = await fetch('/stt', { method: 'POST', headers: await authHeaders(), body: blob });
         const d = await r.json();
-        if (d.text && phase === 'listening') pendingText.textContent = d.text;
+        if (d.text && phase === 'listening') {
+          pendingText.textContent = d.text;
+          pendingText.scrollTop = pendingText.scrollHeight;   // suit le fil
+        }
       } catch (e) { /* un aperçu raté n'interrompt rien */ }
       apercuEnCours = false;
     }, 4000);

@@ -189,6 +189,7 @@ class MistralLLM:
         session_id: str,
         extra_tools: Optional[object] = None,
         system_override: Optional[str] = None,
+        transports: Optional[tuple] = None,
     ) -> str:
         history = self._history.get(session_id, deque(maxlen=self._max_history * 2))
         messages: list[dict] = []
@@ -218,10 +219,14 @@ class MistralLLM:
         else:
             active_tools = extra_tools if extra_tools is not None else self._tools
 
+        # `transports` = (texte, outils) propres à CET appel : c'est ainsi qu'un
+        # membre utilise SA clé et SON fournisseur, sans dupliquer l'objet LLM (la
+        # mémoire, les projets et les compétences restent rangés par session).
+        texte_tr, outils_tr = transports if transports else (None, None)
         if active_tools:
-            response = await self._reply_with_tools(messages, active_tools)
+            response = await self._reply_with_tools(messages, active_tools, outils_tr)
         else:
-            transport = self._transport or self._live_transport()
+            transport = texte_tr or self._transport or self._live_transport()
             response = await transport(messages)
 
         # Mise à jour de l'historique après réponse réussie. NB : seuls le tour
@@ -232,7 +237,8 @@ class MistralLLM:
         self._history[session_id] = history
         return response
 
-    async def _reply_with_tools(self, base: Sequence[dict], tools: object) -> str:
+    async def _reply_with_tools(self, base: Sequence[dict], tools: object,
+                                transport_override: Optional[object] = None) -> str:
         """Boucle function-calling : LLM ↔ outils jusqu'à une réponse en clair.
 
         `tools` = le registre actif pour cet énoncé (globaux + session). Contrat du
@@ -241,7 +247,7 @@ class MistralLLM:
           - "tool_calls" : liste normalisée [{id, name, arguments}] à exécuter ;
           - "assistant"  : message assistant à réinjecter tel quel au tour suivant.
         """
-        transport = self._tool_transport or self._live_tool_transport()
+        transport = transport_override or self._tool_transport or self._live_tool_transport()
         specs = tools.specs()
         work = list(base)
         for _ in range(self._max_tool_hops):

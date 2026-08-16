@@ -39,6 +39,8 @@ from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+from shared.agent.llm_transports import build_transports
+from shared.agent.providers import VAULT_SERVICE, catalogue, get_provider, verifie_cle
 from shared.agent.skill_tools import build_skill_tools
 from shared.agent.skills import SkillStore
 from shared.agent.sync_store import SyncStore
@@ -403,6 +405,7 @@ async def ask(request: web.Request) -> web.Response:
             _llm.reply(
                 message, session_id=session_key, extra_tools=extra_tools,
                 system_override=system_override,
+                transports=_transports_du_membre(member_id),
             ),
             timeout=timeout,
         )
@@ -510,6 +513,73 @@ async def projects_create(request: web.Request) -> web.Response:
         return web.json_response({"error": "nom de projet vide"}, status=400)
     proj = _projects.create_project(ident["member_id"], name)
     return web.json_response({"project": proj.as_dict()})
+
+
+def _transports_du_membre(member_id: str):
+    """(texte, outils) bâtis sur la clé du membre, ou None s'il n'en a pas posé.
+
+    La clé vit dans le coffre chiffré, isolée par membre : elle ne transite jamais
+    par la page une fois enregistrée, et un membre ne peut pas lire celle d'un autre.
+    """
+    if _vault is None:
+        return None
+    secrets = _vault.get_secrets(member_id, VAULT_SERVICE)
+    if not secrets or not secrets.get("api_key"):
+        return None
+    p = get_provider(secrets.get("provider") or "")
+    if p is None:
+        return None
+    modele = (secrets.get("model") or "").strip() or p.modele_defaut
+    return build_transports(p.famille, p.base_url, secrets["api_key"], modele)
+
+
+async def llm_catalogue(request: web.Request) -> web.Response:
+    """POST /llm/catalogue → fournisseurs disponibles + connexion actuelle du membre."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    actuel = None
+    if _vault is not None:
+        s = _vault.get_secrets(ident["member_id"], VAULT_SERVICE) or {}
+        if s.get("api_key"):
+            # On renvoie le fournisseur et le modèle, JAMAIS la clé.
+            actuel = {"provider": s.get("provider"), "model": s.get("model") or ""}
+    return web.json_response({"providers": catalogue(), "actuel": actuel})
+
+
+async def llm_connect(request: web.Request) -> web.Response:
+    """POST /llm/connect {provider, api_key, model} → range la clé dans le coffre."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    if _vault is None:
+        return web.json_response({"error": "coffre indisponible"}, status=503)
+    code = (data.get("provider") or "").strip().lower()
+    cle = (data.get("api_key") or "").strip()
+    probleme = verifie_cle(code, cle)
+    if probleme:
+        return web.json_response({"error": probleme}, status=400)
+    p = get_provider(code)
+    modele = (data.get("model") or "").strip() or p.modele_defaut
+    _vault.store(
+        ident["member_id"], VAULT_SERVICE,
+        {"provider": code, "api_key": cle, "model": modele},
+        {"provider": code, "model": modele},          # méta sans secret
+    )
+    return web.json_response({"ok": True, "provider": p.nom, "model": modele})
+
+
+async def llm_disconnect(request: web.Request) -> web.Response:
+    """POST /llm/disconnect → retire sa clé (retour au fournisseur par défaut)."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    removed = _vault.delete(ident["member_id"], VAULT_SERVICE) if _vault else False
+    return web.json_response({"ok": bool(removed)})
 
 
 async def skills_list(request: web.Request) -> web.Response:
@@ -990,6 +1060,9 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/projects/folders", project_folders)
+    app.router.add_post("/llm/catalogue", llm_catalogue)
+    app.router.add_post("/llm/connect", llm_connect)
+    app.router.add_post("/llm/disconnect", llm_disconnect)
     app.router.add_post("/skills/list", skills_list)
     app.router.add_post("/skills/read", skills_read)
     app.router.add_post("/skills/delete", skills_delete)

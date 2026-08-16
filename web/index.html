@@ -127,6 +127,21 @@
   .sheet-x{background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer}
   .sheet-sub{color:var(--muted); font-size:13px; margin:8px 0 14px}
   .conn-list{display:flex; flex-direction:column; gap:10px}
+  .llm-current{background:var(--soft); border-radius:12px; padding:10px 12px; margin-bottom:12px;
+    font-size:13px; display:flex; justify-content:space-between; align-items:center; gap:10px}
+  .llm-steps{background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px;
+    margin:12px 0; font-size:13px; line-height:1.6; text-align:left}
+  .llm-steps ol{margin:6px 0 0; padding-left:20px}
+  .llm-steps a{color:var(--primary); font-weight:600}
+  .llm-privacy{font-size:12.5px; line-height:1.5; margin:0 0 10px; padding:9px 11px;
+    border-radius:10px; text-align:left}
+  .llm-privacy.ue{background:#ecfdf5; color:#065f46}
+  .llm-privacy.hors-ue{background:#fff7ed; color:#9a3412}
+  #llmKey, #llmModel{width:100%; padding:11px 13px; border:1px solid #e5e7eb; border-radius:12px;
+    font:inherit; font-size:14px; margin-bottom:8px; outline:none; background:#fff}
+  #llmKey:focus, #llmModel:focus{border-color:var(--accent)}
+  .llm-actions{display:flex; gap:8px}
+  .llm-actions .conn-btn{flex:1}
   .skill-view{white-space:pre-wrap; font:inherit; font-size:13px; line-height:1.55; color:#374151;
     background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin-top:12px;
     max-height:46vh; overflow:auto}
@@ -231,6 +246,7 @@
     <div class="actions">
       <button id="englishBtn" class="switch" type="button">Cours d'anglais</button>
       <button id="foldersBtn" class="switch" type="button" hidden>Mes dossiers</button>
+      <button id="llmBtn" class="switch" type="button">Mon IA</button>
       <button id="skillsBtn" class="switch" type="button">Compétences</button>
       <button id="filesBtn" class="switch" type="button">Fichiers</button>
       <button id="memoryBtn" class="switch" type="button">Ma mémoire</button>
@@ -251,6 +267,29 @@
       <div id="foldersList" class="conn-list"></div>
       <button id="addFolderBtn" class="conn-btn" type="button" style="margin-top:12px">Ajouter un dossier</button>
       <p class="sheet-note" id="foldersNote"></p>
+    </div>
+  </div>
+
+  <div class="overlay" id="llmOverlay" hidden>
+    <div class="sheet">
+      <div class="sheet-head">
+        <span>Mon IA</span>
+        <button id="llmClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
+      </div>
+      <p class="sheet-sub">Utilise ta propre clé pour choisir l'IA qui te répond. Si tu n'en mets pas, VindIA fonctionne normalement.</p>
+      <div id="llmCurrent" class="llm-current" hidden></div>
+      <div id="llmList" class="conn-list"></div>
+      <div id="llmForm" hidden>
+        <div id="llmSteps" class="llm-steps"></div>
+        <p class="llm-privacy" id="llmPrivacy"></p>
+        <input id="llmKey" type="password" placeholder="Colle ta clé ici" autocomplete="off" />
+        <select id="llmModel"></select>
+        <div class="llm-actions">
+          <button id="llmSave" class="conn-btn" type="button">Enregistrer</button>
+          <button id="llmCancel" class="conn-btn off" type="button">Annuler</button>
+        </div>
+      </div>
+      <p class="sheet-note" id="llmNote"></p>
     </div>
   </div>
 
@@ -857,6 +896,95 @@
       if (!silent) folderNote().textContent = 'Synchronisation impossible : ' + e.message;
     } finally { syncing = false; }
   }
+
+  // ── Mon IA : chacun apporte sa clé ─────────────────────────────────────────
+  // La clé part directement au coffre chiffré du serveur ; elle n'est jamais
+  // relue ensuite (l'écran affiche seulement le fournisseur et le modèle).
+  let _providers = [], _choisi = null;
+
+  async function renderLlm() {
+    const list = $('llmList'), note = $('llmNote'), cur = $('llmCurrent');
+    list.innerHTML = ''; note.textContent = ''; $('llmForm').hidden = true; cur.hidden = true;
+    let d;
+    try { d = await projApi('/llm/catalogue'); }
+    catch (e) { note.textContent = e.message; return; }
+    _providers = d.providers || [];
+
+    if (d.actuel) {
+      const p = _providers.find(x => x.code === d.actuel.provider);
+      cur.hidden = false; cur.innerHTML = '';
+      const txt = document.createElement('div');
+      txt.innerHTML = '<strong>' + (p ? p.nom : d.actuel.provider) + '</strong><br>'
+        + '<span class="conn-meta">' + (d.actuel.model || '') + '</span>';
+      const off = document.createElement('button');
+      off.className = 'conn-btn off'; off.textContent = 'Retirer ma clé';
+      off.onclick = async () => { await projApi('/llm/disconnect'); await renderLlm(); };
+      cur.appendChild(txt); cur.appendChild(off);
+    }
+
+    for (const p of _providers) {
+      const row = document.createElement('div'); row.className = 'conn-row';
+      const left = document.createElement('div');
+      const name = document.createElement('div'); name.className = 'conn-name'; name.textContent = p.nom;
+      const meta = document.createElement('div'); meta.className = 'conn-meta';
+      meta.textContent = (p.dans_ue ? 'Données en Europe' : 'Données hors Europe') + ' · ' + p.gratuit;
+      left.appendChild(name); left.appendChild(meta);
+      const btn = document.createElement('button');
+      btn.className = 'conn-btn off'; btn.textContent = 'Choisir';
+      btn.onclick = () => ouvrirForm(p);
+      row.appendChild(left); row.appendChild(btn);
+      list.appendChild(row);
+    }
+  }
+
+  function ouvrirForm(p) {
+    _choisi = p;
+    $('llmList').hidden = true; $('llmCurrent').hidden = true; $('llmForm').hidden = false;
+    $('llmNote').textContent = '';
+    // Marche à suivre : la personne n'a peut-être jamais créé de clé API.
+    const etapes = p.etapes.map(e => '<li>' + e + '</li>').join('');
+    $('llmSteps').innerHTML =
+      '<strong>Récupérer ta clé ' + p.nom + '</strong><ol>' + etapes + '</ol>'
+      + '<p style="margin:10px 0 0"><a href="' + p.console_url + '" target="_blank" rel="noopener">'
+      + 'Ouvrir la page des clés ' + p.nom + '</a></p>';
+    const priv = $('llmPrivacy');
+    priv.className = 'llm-privacy ' + (p.dans_ue ? 'ue' : 'hors-ue');
+    priv.textContent = 'Où vont tes données : ' + p.hebergement;
+    $('llmKey').value = '';
+    $('llmModel').innerHTML = p.modeles.map(m =>
+      '<option value="' + m + '"' + (m === p.modele_defaut ? ' selected' : '') + '>' + m + '</option>'
+    ).join('');
+  }
+
+  function fermerForm() {
+    $('llmForm').hidden = true; $('llmList').hidden = false; _choisi = null;
+    $('llmKey').value = '';                    // ne jamais laisser la clé en mémoire
+  }
+
+  $('llmBtn').addEventListener('click', async () => {
+    $('llmOverlay').hidden = false; $('llmList').hidden = false; await renderLlm();
+  });
+  $('llmClose').addEventListener('click', () => { fermerForm(); $('llmOverlay').hidden = true; });
+  $('llmOverlay').addEventListener('click', (e) => {
+    if (e.target === $('llmOverlay')) { fermerForm(); $('llmOverlay').hidden = true; }
+  });
+  $('llmCancel').addEventListener('click', fermerForm);
+  $('llmSave').addEventListener('click', async () => {
+    if (!_choisi) return;
+    const note = $('llmNote'), nom = _choisi.nom;   // lu AVANT fermerForm (qui remet à null)
+    note.textContent = 'Enregistrement…';
+    try {
+      const d = await projApi('/llm/connect', {
+        provider: _choisi.code, api_key: $('llmKey').value, model: $('llmModel').value,
+      });
+      // projApi ne lève que sur 401 : sans ce test, le message d'aide sur une clé
+      // mal recopiée ne s'afficherait jamais et l'écran semblerait figé.
+      if (d && d.error) { note.textContent = d.error; return; }
+      fermerForm();
+      await renderLlm();
+      addLine('ai', 'C\'est noté : je passe par ' + nom + ' à partir de maintenant.');
+    } catch (e) { note.textContent = e.message; }
+  });
 
   // ── Compétences : les méthodes que VindIA applique ────────────────────────
   async function renderSkills() {

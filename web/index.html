@@ -17,6 +17,10 @@
     --font:'Inter','Inter Variable',system-ui,-apple-system,sans-serif;
   }
   *{box-sizing:border-box}
+  /* Toute classe posant `display:` écrase l'attribut `hidden` — piège rencontré
+     trois fois (barre projet, liste des connexions…). Réglé une fois pour toutes :
+     un élément marqué `hidden` est masqué, quelle que soit sa classe. */
+  [hidden]{display:none !important}
   html{height:100%}
   /* min-height et non height : avec un contenu plus haut que la fenêtre, un flex
      centré rogne le HAUT de la carte (titre inaccessible, même en scrollant). */
@@ -119,8 +123,12 @@
   .overlay{position:fixed; inset:0; background:rgba(17,24,39,.45); display:flex;
     align-items:flex-end; justify-content:center; z-index:50}
   .overlay[hidden]{display:none}
+  /* max-height + défilement interne : sans cela, un panneau long (catalogue des
+     fournisseurs, fiche de compétence) dépasse l'écran et le bouton de validation
+     devient inatteignable, même en plein écran. */
   .sheet{background:#fff; width:100%; max-width:440px; border-radius:18px 18px 0 0;
-    padding:20px 18px 26px; box-shadow:0 -8px 30px rgba(0,0,0,.18)}
+    padding:20px 18px 26px; box-shadow:0 -8px 30px rgba(0,0,0,.18);
+    max-height:88vh; overflow-y:auto; overscroll-behavior:contain}
   @media(min-width:480px){.overlay{align-items:center} .sheet{border-radius:18px}}
   @media(min-width:640px){.sheet{max-width:560px}}   /* même seuil que le reste */
   .sheet-head{display:flex; justify-content:space-between; align-items:center; font-weight:700; font-size:16px}
@@ -954,6 +962,10 @@
     $('llmModel').innerHTML = p.modeles.map(m =>
       '<option value="' + m + '"' + (m === p.modele_defaut ? ' selected' : '') + '>' + m + '</option>'
     ).join('');
+    // Le panneau défile : on remonte en haut, sinon la marche à suivre s'ouvre
+    // hors champ et l'utilisateur ne voit que le champ de saisie.
+    const sheet = $('llmOverlay').querySelector('.sheet');
+    if (sheet) sheet.scrollTop = 0;
   }
 
   function fermerForm() {

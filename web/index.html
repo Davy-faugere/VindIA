@@ -1520,7 +1520,7 @@
       mediaRec.start();
       phase = 'listening';
       setState('listening', '<span class="live">À l\'écoute…</span>');
-      hint.textContent = "Parle, puis appuie sur « Envoyer » quand tu as terminé.";
+      hint.textContent = "Parle, puis appuie sur « Envoyer ». Tu pourras relire et corriger le texte avant de me l'envoyer.";
       orb.textContent = 'Envoyer';
     } catch (e) {
       errEl.textContent = "Micro inaccessible : " + (e.message || e.name);
@@ -1542,7 +1542,18 @@
       const d = await r.json();
       if (d.error) { errEl.textContent = d.error; resumeIfConversing(); return; }
       if (!d.text) { errEl.textContent = "Je n'ai rien compris, réessaie."; resumeIfConversing(); return; }
-      ask(d.text);
+      // La transcription n'arrive qu'APRÈS avoir parlé : on la dépose dans le champ
+      // de saisie plutôt que de l'envoyer aussitôt, pour pouvoir la relire et la
+      // corriger. Un mot mal transcrit ne part donc plus tel quel.
+      textInput.value = d.text;
+      textInput.focus();
+      textInput.setSelectionRange(d.text.length, d.text.length);
+      // On repasse au repos : sinon le micro se remettrait à enregistrer pendant
+      // la relecture, et le bouton n'aurait plus le même sens qu'affiché.
+      conversing = false; phase = 'idle';
+      setState('idle', 'À relire');
+      hint.textContent = "Corrige si besoin, puis appuie sur Envoyer (ou la touche Entrée).";
+      orb.textContent = 'Démarrer';
     } catch (e) { errEl.textContent = e.message; resumeIfConversing(); }
   }
 

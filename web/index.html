@@ -172,7 +172,7 @@
      (l'orbe et les boutons se déplaçaient sous le curseur). Le texte défile
      à l'intérieur. */
   .pending-text{font-size:15px; line-height:1.5; color:var(--text); margin-bottom:11px;
-    height:4.5em; overflow-y:auto; outline:none}
+    height:6em; overflow-y:auto; outline:none}
   .pending-text:focus{color:var(--text)}
   .pending-text:empty::before{content:'…'; color:var(--muted)}
   .pending-actions{display:flex; gap:8px}
@@ -231,7 +231,7 @@
     <div class="err" id="err"></div>
 
     <div class="pending" id="pending">
-      <div class="pending-text" id="pendingText" contenteditable="true" spellcheck="true"></div>
+      <div class="pending-text" id="pendingText" spellcheck="true"></div>
       <div class="pending-actions">
         <button id="cancelBtn" class="pbtn cancel">Annuler</button>
         <button id="sendNowBtn" class="pbtn send">Envoyer</button>
@@ -1566,6 +1566,7 @@
       hint.textContent = "Parle tranquillement — le texte s'écrit au fur et à mesure.";
       orb.textContent = 'Arrêter';
       {
+        pendingText.removeAttribute('contenteditable');   // lecture seule tant que ça s'écrit
         pendingText.textContent = '';
         pending.classList.add('show');
         pendingFill.classList.remove('run');
@@ -1592,9 +1593,8 @@
         const blob = new Blob(morceaux.slice(), { type: mediaRec.mimeType || 'audio/webm' });
         const r = await fetch('/stt', { method: 'POST', headers: await authHeaders(), body: blob });
         const d = await r.json();
-        if (d.text && phase === 'listening') {
+        if (d.text && phase === 'listening' && d.text !== pendingText.textContent) {
           pendingText.textContent = d.text;
-          pendingText.scrollTop = pendingText.scrollHeight;   // suit le fil
         }
       } catch (e) { /* un aperçu raté n'interrompt rien */ }
       apercuEnCours = false;
@@ -1657,6 +1657,7 @@
 
   function enterConfirm(txt) {
     phase = 'confirm';
+    pendingText.setAttribute('contenteditable', 'true');   // corrigeable : plus rien ne bouge
     if (recog) { try { recog.stop(); } catch (e) {} }
     setState('idle', 'À vérifier');
     pendingText.textContent = txt;

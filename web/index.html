@@ -453,7 +453,10 @@
   let _displayName = '', _isAdmin = false;
   // Mode « cours d'anglais » : conversation en anglais, corrections expliquées en français.
   // Mémorisé sur l'appareil pour survivre à un rechargement.
-  let englishMode = localStorage.getItem('vindia_english') === '1';
+  // Volontairement NON persistant entre deux ouvertures : un mode anglais restauré
+  // en silence fait répondre en anglais alors qu'on croit parler à VindIA en
+  // français — c'est vécu comme un « mélange de langues » inexplicable.
+  let englishMode = false;
   async function resolveIdentity() {
     try {
       const r = await fetch('/auth', { method: 'POST', headers: await authHeaders() });
@@ -470,7 +473,6 @@
         $('filesBtn').hidden = false;
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
-        if (englishMode) applyEnglishMode();   // restaure le cours d'anglais après rechargement
         hideLogin(); pendingScreen.hidden = true;
         return true;
       }
@@ -1260,6 +1262,9 @@
   function applyEnglishMode() {
     const b = $('englishBtn');
     b.textContent = englishMode ? "Quitter le cours d'anglais" : "Cours d'anglais";
+    sub.textContent = englishMode
+      ? "Cours d'anglais en cours — VindIA répond en anglais"
+      : (_displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français');
     b.style.color = englishMode ? 'var(--primary)' : '';
     b.style.fontWeight = englishMode ? '700' : '';
     if (recog) recog.lang = englishMode ? 'en-US' : 'fr-FR';   // dictée dans la bonne langue
@@ -1275,7 +1280,6 @@
   $('englishBtn').addEventListener('click', () => {
     if (conversing) stopConversation();
     englishMode = !englishMode;
-    localStorage.setItem('vindia_english', englishMode ? '1' : '');
     applyEnglishMode();
     if (englishMode) {
       addLine('ai', "Cours d'anglais activé. Dis-moi bonjour en anglais pour commencer.");
@@ -1594,7 +1598,7 @@
         }
       } catch (e) { /* un aperçu raté n'interrompt rien */ }
       apercuEnCours = false;
-    }, 4000);
+    }, 2000);
   }
 
   function stopApercu() { clearInterval(apercuTimer); apercuTimer = null; }
@@ -1735,11 +1739,25 @@
 
   function startConversation() {
     conversing = true; orb.textContent = 'Arrêter'; errEl.textContent = '';
+    clearTimers(); hidePending();          // repart d'une zone vierge
     startListening();
   }
   function stopConversation() {
-    conversing = false; phase = 'idle'; orb.textContent = 'Démarrer';
-    clearTimers(); hidePending();
+    conversing = false; orb.textContent = 'Démarrer';
+    clearTimers();
+    // Si une phrase est en cours, on la CONSERVE : elle reste affichée, modifiable,
+    // et les boutons Annuler/Envoyer restent actifs. Sans quoi arrêter faisait
+    // perdre ce qui venait d'être dicté.
+    const enCours = pendingText.textContent.trim();
+    if (enCours) {
+      phase = 'confirm';
+      pending.classList.add('show');
+      pendingFill.classList.remove('run');       // plus de compte à rebours
+      setState('idle', 'À corriger');
+      hint.textContent = "Corrige le texte si besoin, puis Envoyer. Ou appuie sur Démarrer pour reprendre.";
+    } else {
+      phase = 'idle'; hidePending();
+    }
     speakToken++;   // invalide toute lecture vocale en cours (y compris entre deux phrases)
     if (recog) { try { recog.abort(); } catch (e) {} }
     if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (e) {} }
@@ -1747,8 +1765,10 @@
     orb.textContent = 'Démarrer';
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix en cours
-    setState('idle', 'Prêt');
-    hint.textContent = "Conversation en pause. Appuie pour reprendre.";
+    if (phase !== 'confirm') {
+      setState('idle', 'Prêt');
+      hint.textContent = "Conversation en pause. Appuie pour reprendre.";
+    }
   }
 
   orb.addEventListener('click', () => {

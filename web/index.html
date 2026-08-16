@@ -1515,7 +1515,10 @@
   let micRole = 'message';
   let relectureTimer = null, decompteTimer = null;
   const RELECTURE_S = 10;        // délai de relecture avant la demande vocale
-  const FIN_PAROLE_MS = 2200;    // silence au-delà duquel on considère la phrase finie
+  // Silence au-delà duquel on considère que la personne a fini. Long quand elle
+  // DICTE (on réfléchit en parlant, une pause ne doit pas couper la phrase), court
+  // quand elle répond juste « oui » ou « non ».
+  const FIN_PAROLE_MS = { message: 10000, confirmation: 2000 };
 
   // -- détection de fin de parole --------------------------------------------
   // Sans elle, il faudrait cliquer pour arrêter d'enregistrer. On mesure le niveau
@@ -1523,7 +1526,7 @@
   // effectivement parlé), on clôt l'enregistrement.
   let audioCtx = null, silenceTick = null;
 
-  function surveillerFinDeParole(stream, onFin) {
+  function surveillerFinDeParole(stream, onFin, seuilMs) {
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
       const analyser = audioCtx.createAnalyser();
@@ -1537,7 +1540,7 @@
         let crete = 0;
         for (let i = 0; i < buf.length; i++) crete = Math.max(crete, Math.abs(buf[i] - 128));
         if (crete > 7) { dernierSon = Date.now(); aParle = true; }
-        else if (aParle && Date.now() - dernierSon > FIN_PAROLE_MS) {
+        else if (aParle && Date.now() - dernierSon > seuilMs) {
           clearInterval(silenceTick); silenceTick = null; onFin();
         }
       }, 150);
@@ -1562,9 +1565,10 @@
       setState('listening', '<span class="live">À l\'écoute…</span>');
       hint.textContent = micRole === 'confirmation'
         ? "Dis « oui » pour envoyer, ou continue à parler pour compléter."
-        : "Parle tranquillement. Je m'arrête toute seule quand tu as fini.";
+        : "Parle tranquillement, prends tes pauses. Appuie sur « Envoyer » quand tu as fini.";
       orb.textContent = 'Envoyer';
-      surveillerFinDeParole(micStream, () => envoyerEnregistrement());
+      surveillerFinDeParole(micStream, () => envoyerEnregistrement(),
+                            FIN_PAROLE_MS[micRole] || FIN_PAROLE_MS.message);
     } catch (e) {
       errEl.textContent = "Micro inaccessible : " + (e.message || e.name);
       setState('idle', 'Prêt');

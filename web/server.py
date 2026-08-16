@@ -533,6 +533,57 @@ def _transports_du_membre(member_id: str):
     return build_transports(p.famille, p.base_url, secrets["api_key"], modele)
 
 
+async def stt(request: web.Request) -> web.Response:
+    """POST /stt (audio brut) → {text} — transcription par Voxtral.
+
+    Indispensable hors de Chrome : la reconnaissance vocale du navigateur s'appuie
+    sur un service Google absent d'une application installée (erreur « network »)
+    et de Firefox. On transcrit donc nous-mêmes, ce qui marche partout — et reste
+    en Europe, comme le reste de la chaîne.
+    """
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    if not _check_rate(ident["member_id"]):
+        return web.json_response({"error": "trop de requêtes"}, status=429)
+    data = await request.read()
+    if not data:
+        return web.json_response({"error": "audio vide"}, status=400)
+    if len(data) > _MAX_UPLOAD:
+        return web.json_response({"error": "enregistrement trop long"}, status=413)
+    try:
+        audio = await asyncio.get_running_loop().run_in_executor(None, _vers_mp3, data)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": f"audio illisible : {str(exc)[:120]}"}, status=400)
+    try:
+        from shared.agent.adapters import VoxtralSTT
+
+        texte = await asyncio.wait_for(VoxtralSTT().transcribe(audio, "fr-FR"), timeout=90)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "transcription trop longue"}, status=504)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": str(exc)[:200]}, status=502)
+    return web.json_response({"text": (texte or "").strip()})
+
+
+def _vers_mp3(data: bytes) -> bytes:
+    """Convertit l'enregistrement du navigateur (webm/opus) en MP3 mono 16 kHz.
+
+    Le format produit par MediaRecorder varie selon le navigateur ; ffmpeg le
+    normalise, ce qui évite de dépendre de ce que le poste a bien voulu encoder.
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+         "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", "pipe:1"],
+        input=data, capture_output=True, timeout=120,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError((proc.stderr or b"").decode("utf-8", "replace")[:160] or "conversion échouée")
+    return proc.stdout
+
+
 async def llm_catalogue(request: web.Request) -> web.Response:
     """POST /llm/catalogue → fournisseurs disponibles + connexion actuelle du membre."""
     ident, err = await _require_approved(request)
@@ -1060,6 +1111,7 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/projects/folders", project_folders)
+    app.router.add_post("/stt", stt)
     app.router.add_post("/llm/catalogue", llm_catalogue)
     app.router.add_post("/llm/connect", llm_connect)
     app.router.add_post("/llm/disconnect", llm_disconnect)

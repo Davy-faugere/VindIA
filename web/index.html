@@ -1504,11 +1504,55 @@
                           .map(k => segs[k]).join(' ').trim();
   pending.style.setProperty('--confirm', CONFIRM_MS + 'ms');
 
+  // ── Secours : transcription par NOTRE serveur (Voxtral) ───────────────────
+  // La reconnaissance du navigateur s'appuie sur un service Google absent d'une
+  // application installée (erreur « network ») et de Firefox. Dans ce cas on
+  // enregistre le micro et on transcrit côté serveur : ça marche partout, et
+  // l'audio reste en Europe.
+  let sttServeur = !SR, mediaRec = null, morceaux = [], micStream = null;
+
+  async function startEnregistrement() {
+    try {
+      if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      morceaux = [];
+      mediaRec = new MediaRecorder(micStream);
+      mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) morceaux.push(e.data); };
+      mediaRec.start();
+      phase = 'listening';
+      setState('listening', '<span class="live">À l\'écoute…</span>');
+      hint.textContent = "Parle, puis appuie sur « Envoyer » quand tu as terminé.";
+      orb.textContent = 'Envoyer';
+    } catch (e) {
+      errEl.textContent = "Micro inaccessible : " + (e.message || e.name);
+      setState('idle', 'Prêt');
+    }
+  }
+
+  async function envoyerEnregistrement() {
+    if (!mediaRec || mediaRec.state === 'inactive') return;
+    const fini = new Promise((res) => { mediaRec.onstop = res; });
+    mediaRec.stop();
+    await fini;
+    const blob = new Blob(morceaux, { type: mediaRec.mimeType || 'audio/webm' });
+    orb.textContent = 'Arrêter';
+    if (blob.size < 1500) { errEl.textContent = "Je n'ai rien entendu."; resumeIfConversing(); return; }
+    setState('thinking', 'Je transcris…');
+    try {
+      const r = await fetch('/stt', { method: 'POST', headers: await authHeaders(), body: blob });
+      const d = await r.json();
+      if (d.error) { errEl.textContent = d.error; resumeIfConversing(); return; }
+      if (!d.text) { errEl.textContent = "Je n'ai rien compris, réessaie."; resumeIfConversing(); return; }
+      ask(d.text);
+    } catch (e) { errEl.textContent = e.message; resumeIfConversing(); }
+  }
+
   const clearTimers = () => { clearTimeout(silenceTimer); clearTimeout(confirmTimer); silenceTimer = confirmTimer = null; };
   const hidePending = () => { pending.classList.remove('show'); pendingText.textContent = ''; pendingFill.classList.remove('run'); };
 
   function startListening() {
-    if (!recog || !conversing) return;
+    if (!conversing) return;
+    if (sttServeur) { startEnregistrement(); return; }
+    if (!recog) return;
     phase = 'listening'; finalBuf = ''; segs = {}; clearTimers(); hidePending();
     try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
     try { recog.start(); } catch (e) { /* déjà lancé */ }
@@ -1570,6 +1614,16 @@
       armSilence();
     };
     recog.onerror = (ev) => {
+      // « network » / « service-not-allowed » : la reconnaissance du navigateur
+      // n'est pas disponible ici (application installée, Firefox…). On bascule
+      // définitivement sur notre transcription au lieu d'afficher un code d'erreur.
+      if (ev.error === 'network' || ev.error === 'service-not-allowed') {
+        sttServeur = true;
+        try { recog.abort(); } catch (e) {}
+        errEl.textContent = '';
+        if (conversing) startEnregistrement();
+        return;
+      }
       if (ev.error !== 'no-speech' && ev.error !== 'aborted') errEl.textContent = "Micro : " + ev.error;
     };
     // Le navigateur arrête parfois l'écoute tout seul → on relance tant qu'on écoute
@@ -1579,10 +1633,10 @@
       const cur = segsText();
       if (cur) finalBuf = (finalBuf + ' ' + cur).replace(/\s+/g, ' ').trim();
       segs = {};
-      if (conversing && phase === 'listening') { try { recog.start(); } catch (e) {} }
+      if (!sttServeur && conversing && phase === 'listening') { try { recog.start(); } catch (e) {} }
     };
   } else {
-    hint.textContent = "Reconnaissance vocale non dispo sur ce navigateur — utilise la saisie texte ci-dessous.";
+    hint.textContent = "Appuie pour parler : je transcris moi-même.";
   }
 
   cancelBtn.addEventListener('click', cancelPending);
@@ -1597,6 +1651,7 @@
     clearTimers(); hidePending();
     speakToken++;   // invalide toute lecture vocale en cours (y compris entre deux phrases)
     if (recog) { try { recog.abort(); } catch (e) {} }
+    if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (e) {} }
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix en cours
     setState('idle', 'Prêt');
@@ -1605,7 +1660,8 @@
 
   orb.addEventListener('click', () => {
     errEl.textContent = '';
-    if (!recog) { textInput.focus(); return; }
+    if (!recog && !sttServeur) { textInput.focus(); return; }
+    if (sttServeur && conversing && phase === 'listening') { envoyerEnregistrement(); return; }
     conversing ? stopConversation() : startConversation();
   });
 

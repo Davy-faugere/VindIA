@@ -1499,7 +1499,7 @@
         pendingFill = $('pendingFill'), cancelBtn = $('cancelBtn'), sendNowBtn = $('sendNowBtn');
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const SILENCE_MS = 2500;   // silence requis avant de proposer l'envoi (généreux : ne coupe pas aux pauses)
-  const CONFIRM_MS = 10000;  // fenêtre pour relire, corriger et annuler avant l'envoi
+  const CONFIRM_MS = 7000;   // fenêtre pour relire, corriger ou annuler — puis envoi AUTOMATIQUE
   let recog = null, finalBuf = '', silenceTimer = null, confirmTimer = null, phase = 'idle';
   // Segments définitifs de la session de reconnaissance EN COURS, indexés par leur
   // position. Sur mobile le navigateur coupe et relance sans cesse la reconnaissance :
@@ -1516,13 +1516,8 @@
   // enregistre le micro et on transcrit côté serveur : ça marche partout, et
   // l'audio reste en Europe.
   let sttServeur = !SR, mediaRec = null, morceaux = [], micStream = null;
-  // Ce que le micro est en train de capter : le message lui-même, ou la réponse à
-  // « je t'envoie ça ? ». La même mécanique d'enregistrement sert aux deux.
-  let micRole = 'message';
-  // Silence au-delà duquel on considère que la personne a fini. Long quand elle
-  // DICTE (on réfléchit en parlant, une pause ne doit pas couper la phrase), court
-  // quand elle répond juste « oui » ou « non ».
-  const FIN_PAROLE_MS = { message: 10000, confirmation: 2000 };
+  // Silence au-delà duquel on considère que la phrase est finie. Valeur d'origine.
+  const FIN_PAROLE_MS = 2500;
 
   // -- détection de fin de parole --------------------------------------------
   // Sans elle, il faudrait cliquer pour arrêter d'enregistrer. On mesure le niveau
@@ -1553,8 +1548,7 @@
 
   function stopSurveillance() { clearInterval(silenceTick); silenceTick = null; }
 
-  async function startEnregistrement(role) {
-    micRole = role || 'message';
+  async function startEnregistrement() {
     try {
       if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       morceaux = [];
@@ -1565,18 +1559,15 @@
       mediaRec.start(1000);
       phase = 'listening';
       setState('listening', '<span class="live">À l\'écoute…</span>');
-      hint.textContent = micRole === 'confirmation'
-        ? "Dis « oui » pour envoyer, ou continue à parler pour compléter."
-        : "Parle tranquillement, prends tes pauses. Le texte s'affiche au fur et à mesure.";
+      hint.textContent = "Parle tranquillement — le texte s'écrit au fur et à mesure.";
       orb.textContent = 'Arrêter';
-      if (micRole === 'message') {
+      {
         pendingText.textContent = '';
         pending.classList.add('show');
         pendingFill.classList.remove('run');
         demarrerApercu();
       }
-      surveillerFinDeParole(micStream, () => envoyerEnregistrement(),
-                            FIN_PAROLE_MS[micRole] || FIN_PAROLE_MS.message);
+      surveillerFinDeParole(micStream, () => envoyerEnregistrement(), FIN_PAROLE_MS);
     } catch (e) {
       errEl.textContent = "Micro inaccessible : " + (e.message || e.name);
       setState('idle', 'Prêt');
@@ -1617,7 +1608,7 @@
     const blob = new Blob(morceaux, { type: mediaRec.mimeType || 'audio/webm' });
     if (blob.size < 1500) {
       errEl.textContent = "Je n'ai rien entendu.";
-      if (conversing) startEnregistrement(micRole);
+      if (conversing) startEnregistrement();
       return;
     }
     setState('thinking', 'Je transcris…');
@@ -1626,41 +1617,13 @@
       const d = await r.json();
       if (d.error || !d.text) {
         errEl.textContent = d.error || "Je n'ai rien compris, réessaie.";
-        if (conversing) startEnregistrement(micRole);
+        if (conversing) startEnregistrement();
         return;
       }
-      if (micRole === 'confirmation') traiterConfirmation(d.text);
-      else enterConfirm(d.text);          // texte + barre dégressive, comme avant
+      enterConfirm(d.text);               // texte + barre dégressive, puis envoi auto
     } catch (e) {
       errEl.textContent = e.message;
-      if (conversing) startEnregistrement(micRole);
-    }
-  }
-
-  function demanderConfirmation() {
-    if (!pendingText.textContent.trim()) { setState('idle', 'Prêt'); return; }
-    phase = 'confirmation';
-    setState('speaking', 'Je te demande confirmation');
-    // On parle, PUIS on écoute : sans ce chaînage, le micro capterait la question.
-    speak("Je t'envoie ce message ?", () => {
-      if (conversing) startEnregistrement('confirmation');
-    });
-  }
-
-  const DIT_OUI = /\b(oui|ouais|ok|okay|d'accord|daccord|vas[- ]y|envoie|envoies|valide|c'est bon|cest bon|parfait|exact)\b/i;
-  const DIT_NON = /\b(non|nan|annule|attends|attend|stop|pas encore)\b/i;
-
-  function traiterConfirmation(reponse) {
-    if (DIT_OUI.test(reponse)) { confirmSend(); return; }
-    // Tout ce qui n'est pas « oui » relance l'enregistrement. Un simple refus ne
-    // doit pas atterrir dans le message ; le reste est pris comme un complément.
-    if (DIT_NON.test(reponse)) {
-      hint.textContent = "D'accord, je continue à t'écouter.";
-      startEnregistrement('message');
-    } else {
-      // Ni oui ni non : c'est un complément. On l'ajoute et on relance le décompte.
-      const cumul = (pendingText.textContent.trim() + ' ' + reponse).replace(/\s+/g, ' ').trim();
-      enterConfirm(cumul);
+      if (conversing) startEnregistrement();
     }
   }
 
@@ -1669,7 +1632,7 @@
 
   function startListening() {
     if (!conversing) return;
-    if (sttServeur) { startEnregistrement('message'); return; }
+    if (sttServeur) { startEnregistrement(); return; }
     if (!recog) return;
     phase = 'listening'; finalBuf = ''; segs = {}; clearTimers(); hidePending();
     try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
@@ -1697,9 +1660,7 @@
     hint.textContent = "Relis et corrige directement le texte si besoin. Tu peux annuler ou envoyer.";
     pendingFill.classList.remove('run'); void pendingFill.offsetWidth; pendingFill.classList.add('run');
     clearTimeout(confirmTimer);
-    // En transcription serveur, la fin du compte à rebours DEMANDE confirmation à
-    // voix haute au lieu d'envoyer directement.
-    confirmTimer = setTimeout(sttServeur ? demanderConfirmation : confirmSend, CONFIRM_MS);
+    confirmTimer = setTimeout(confirmSend, CONFIRM_MS);
   }
 
   // Corriger le texte suspend le compte à rebours : sinon l'envoi tomberait au
@@ -1751,7 +1712,7 @@
         sttServeur = true;
         try { recog.abort(); } catch (e) {}
         errEl.textContent = '';
-        if (conversing) startEnregistrement('message');
+        if (conversing) startEnregistrement();
         return;
       }
       if (ev.error !== 'no-speech' && ev.error !== 'aborted') errEl.textContent = "Micro : " + ev.error;
@@ -1783,7 +1744,6 @@
     if (recog) { try { recog.abort(); } catch (e) {} }
     if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (e) {} }
     stopSurveillance(); stopApercu();
-    micRole = 'message';
     orb.textContent = 'Démarrer';
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }  // coupe la voix en cours

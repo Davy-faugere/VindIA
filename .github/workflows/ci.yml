@@ -23,3 +23,48 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -s shared/agent/tests -t . -v
+
+  page:
+    name: Contrôles de la page (JS, éléments, CSS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Chaque contrôle correspond à un bug réellement survenu en production :
+      # un élément appelé mais absent du HTML rendait un bouton inerte, sans
+      # message d'erreur visible.
+      - name: Syntaxe JavaScript
+        run: |
+          python3 - <<'EOF' > /tmp/app.js
+          import re, pathlib
+          h = pathlib.Path('web/index.html').read_text(encoding='utf-8')
+          print(re.search(r'<script>(.*)</script>', h, re.S).group(1))
+          EOF
+          node --check /tmp/app.js
+
+      - name: Éléments appelés mais absents du HTML
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib, sys
+          h = pathlib.Path('web/index.html').read_text(encoding='utf-8')
+          js = re.search(r'<script>(.*)</script>', h, re.S).group(1)
+          ids = set(re.findall(r'id="([^"]+)"', h))
+          manquants = sorted({m for m in re.findall(r"\$\('([^']+)'\)", js)} - ids)
+          if manquants:
+              print("Éléments appelés mais absents du HTML :", ", ".join(manquants))
+              sys.exit(1)
+          print("Tous les éléments appelés existent.")
+          EOF
+
+      - name: Accolades CSS équilibrées
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib, sys
+          css = re.search(r'<style>(.*?)</style>',
+                          pathlib.Path('web/index.html').read_text(encoding='utf-8'), re.S).group(1)
+          if css.count('{') != css.count('}'):
+              print("Accolades CSS déséquilibrées :", css.count('{'), "ouvertes,", css.count('}'), "fermées")
+              sys.exit(1)
+          print("Accolades CSS équilibrées.")
+          EOF

@@ -1510,8 +1510,12 @@
   // les index repartent alors à zéro. Indexer (au lieu d'empiler) évite que les mêmes
   // mots soient ré-ajoutés à chaque relance — c'était la cause des répétitions.
   let segs = {};
+  // Android ne se contente pas de relancer : DANS une même session, il émet
+  // plusieurs résultats définitifs qui se recouvrent (« bon », « bon visiblement »,
+  // « bon visiblement il »…). Les coller bout à bout produisait la cascade ; on
+  // les fusionne donc aussi entre eux.
   const segsText = () => Object.keys(segs).map(Number).sort((a, b) => a - b)
-                          .map(k => segs[k]).join(' ').trim();
+                          .map(k => segs[k]).reduce((acc, t) => fusionner(acc, t), '');
 
   // Sur Android, le moteur coupe et relance sans cesse, et il ré-émet souvent le
   // texte COMPLET depuis le début. Concaténer produisait alors une cascade :

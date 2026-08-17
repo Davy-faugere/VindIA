@@ -680,6 +680,12 @@
   // Formats bureautiques construits cote serveur (vrais binaires Word/Excel/PowerPoint/PDF)
   const OFFICE = ['docx', 'xlsx', 'pptx', 'pdf'];
 
+  function telecharger(nom, blob) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = nom; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
   // Propose un fichier genere au telechargement.
   // Texte -> blob cote client. Bureautique -> /build cote serveur (rien stocke).
   async function offerDownload(name, content) {
@@ -1306,10 +1312,21 @@
           btn.disabled = true;
           try {
             const r = await projApi('/projects/file', { project_id: pid, filename: doc.filename });
-            const blob = new Blob([r.content || ''], { type: 'text/plain;charset=utf-8' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob); a.download = doc.filename; a.click();
-            URL.revokeObjectURL(a.href);
+            // Les fichiers d'un projet sont stockés en TEXTE. Les livrer tels quels
+            // sous un nom .docx/.xlsx/.pptx/.pdf produisait un fichier que Word ou
+            // Excel refusent d'ouvrir. On passe donc par le générateur, comme pour
+            // les documents créés dans la conversation.
+            const ext = (doc.filename.split('.').pop() || '').toLowerCase();
+            if (OFFICE.includes(ext)) {
+              const b = await fetch('/build', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: doc.filename, content: r.content || '' })
+              });
+              if (!b.ok) throw new Error('génération impossible (' + b.status + ')');
+              telecharger(doc.filename, await b.blob());
+            } else {
+              telecharger(doc.filename, new Blob([r.content || ''], { type: 'text/plain;charset=utf-8' }));
+            }
           } catch (e) { filesNote.textContent = e.message; }
           finally { btn.disabled = false; }
         };

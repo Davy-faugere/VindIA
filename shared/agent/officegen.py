@@ -257,17 +257,41 @@ def _sniff_rows(content: str):
 
 def _build_xlsx(content: str, base_dir=None) -> bytes:
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Feuille1"
     rows = _sniff_rows(content)
+    # Mise en forme : un tableur livrable se lit d'un coup d'œil — en-tête contrasté,
+    # filtres, première ligne figée, nombres alignés à droite.
+    entete_fond = PatternFill("solid", fgColor="4F46E5")
+    filet = Side(style="thin", color="D9D9E3")
+    bordure = Border(left=filet, right=filet, top=filet, bottom=filet)
     for r, row in enumerate(rows, start=1):
         for c, val in enumerate(row, start=1):
-            cell = ws.cell(row=r, column=c, value=val)
+            valeur, texte = val, str(val).strip()
+            # Un nombre écrit en texte ne se totalise pas : on convertit quand c'est
+            # sans ambiguïté (virgule décimale française comprise).
+            if r > 1 and texte:
+                essai = texte.replace("\u202f", "").replace(" ", "").replace(",", ".")
+                if essai.replace(".", "", 1).replace("-", "", 1).isdigit():
+                    try:
+                        valeur = float(essai) if "." in essai else int(essai)
+                    except ValueError:
+                        valeur = val
+            cell = ws.cell(row=r, column=c, value=valeur)
+            cell.border = bordure
             if r == 1:
-                cell.font = Font(bold=True)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = entete_fond
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            elif isinstance(valeur, (int, float)):
+                cell.alignment = Alignment(horizontal="right")
+    if len(rows) > 1:
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(max(len(r) for r in rows))}{len(rows)}"
     if rows:
         for c in range(1, max(len(r) for r in rows) + 1):
             width = max((len(str(row[c - 1])) for row in rows if len(row) >= c), default=10)

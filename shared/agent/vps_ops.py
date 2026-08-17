@@ -3,10 +3,14 @@
 VindIA peut renseigner sur la santé du VPS et l'état d'un service, via l'API ops
 du mcp-server (déjà sécurisée côté serveur : services en liste blanche, clé X-API-Key).
 
-GARDE-FOU STRICT : ce connecteur n'expose QUE deux lectures (santé + état d'un
-service). Les endpoints sensibles de l'API ops (restart, reload, file-read,
-dispatch-mission…) ne sont PAS branchés → le LLM ne peut pas les invoquer. Toute
+GARDE-FOU STRICT : ce connecteur n'expose que des LECTURES — santé, état d'un
+service, et contenu d'un fichier. Les endpoints qui AGISSENT (restart, reload,
+dispatch-mission…) ne sont pas branchés → le LLM ne peut pas les invoquer. Toute
 action sur le VPS reste hors de portée de VindIA (cohérent avec les garde-fous flotte).
+
+La lecture de fichier s'appuie sur la liste blanche de chemins déjà appliquée par
+l'API ops elle-même : le filtrage a lieu côté serveur, pas ici — un garde-fou qui
+ne dépend pas de ce que le modèle envoie.
 
 Style maison : 0 dépendance tierce au chargement ; le transport HTTP est injectable
 (aiohttp en prod, fake en test) → testable 100 % offline.
@@ -102,6 +106,50 @@ def ops_http_transport(base_url: str, api_key: str, *, timeout: float = 8.0) -> 
     return _call
 
 
+class VpsReadFileTool(Tool):
+    """Lit un fichier du serveur, parmi les chemins autorisés par l'API ops."""
+
+    MAX = 6000
+
+    def __init__(self, transport: OpsTransport) -> None:
+        self._transport = transport
+        self.spec = ToolSpec(
+            name="vps_read_file",
+            description=(
+                "Lit un fichier de configuration ou un journal du serveur "
+                "(configuration nginx, journaux, fichiers du site). Utilise "
+                "vps_health pour connaître les emplacements autorisés. Lecture "
+                "seule : aucune modification n'est possible."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Chemin absolu du fichier."}
+                },
+                "required": ["path"],
+            },
+        )
+
+    async def run(self, args: dict) -> str:
+        chemin = (args.get("path") or "").strip()
+        if not chemin:
+            return "Erreur : chemin manquant."
+        try:
+            data = await self._transport("/ops/file-read", {"path": chemin})
+        except Exception as exc:  # noqa: BLE001
+            return f"Lecture impossible : {str(exc)[:180]}"
+        if isinstance(data, dict) and data.get("error"):
+            return f"Refusé par le serveur : {str(data['error'])[:180]}"
+        contenu = (data or {}).get("content") if isinstance(data, dict) else None
+        if contenu is None:
+            return "Le serveur n'a renvoyé aucun contenu pour ce fichier."
+        contenu = str(contenu)
+        if len(contenu) > self.MAX:
+            # On garde la FIN : sur un journal, c'est le récent qui compte.
+            contenu = "[…début tronqué…]\n" + contenu[-self.MAX:]
+        return contenu or "Fichier vide."
+
+
 def build_vps_tools() -> List[Tool]:
     """Outils VPS (lecture seule) depuis l'environnement, ou [] si non configuré.
 
@@ -112,4 +160,5 @@ def build_vps_tools() -> List[Tool]:
     if not base or not key:
         return []
     transport = ops_http_transport(base, key)
-    return [VpsHealthTool(transport), VpsServiceStatusTool(transport)]
+    return [VpsHealthTool(transport), VpsServiceStatusTool(transport),
+            VpsReadFileTool(transport)]

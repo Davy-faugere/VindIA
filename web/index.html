@@ -1512,6 +1512,23 @@
   let segs = {};
   const segsText = () => Object.keys(segs).map(Number).sort((a, b) => a - b)
                           .map(k => segs[k]).join(' ').trim();
+
+  // Sur Android, le moteur coupe et relance sans cesse, et il ré-émet souvent le
+  // texte COMPLET depuis le début. Concaténer produisait alors une cascade :
+  // « alors / alors est-ce / alors est-ce que / … ». On fusionne en supprimant le
+  // recouvrement au lieu d'empiler.
+  function fusionner(avant, nouveau) {
+    avant = (avant || '').trim(); nouveau = (nouveau || '').trim();
+    if (!avant) return nouveau;
+    if (!nouveau) return avant;
+    if (nouveau.startsWith(avant)) return nouveau;   // reprise depuis le début
+    if (avant.startsWith(nouveau)) return avant;     // répétition d'un fragment déjà là
+    const max = Math.min(avant.length, nouveau.length);
+    for (let n = max; n > 3; n--) {
+      if (avant.slice(-n) === nouveau.slice(0, n)) return avant + nouveau.slice(n);
+    }
+    return avant + ' ' + nouveau;
+  }
   pending.style.setProperty('--confirm', CONFIRM_MS + 'ms');
 
   // ── Secours : transcription par NOTRE serveur (Voxtral) ───────────────────
@@ -1650,7 +1667,7 @@
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => {
       // Phrase complète = ce qui est figé + la session en cours.
-      const txt = [finalBuf, segsText()].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+      const txt = fusionner(finalBuf, segsText());
       if (txt) enterConfirm(txt);
     }, SILENCE_MS);
   }
@@ -1705,8 +1722,7 @@
         else interim += res[0].transcript;
       }
       pending.classList.add('show');
-      pendingText.textContent = [finalBuf, segsText(), interim]
-        .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+      pendingText.textContent = fusionner(fusionner(finalBuf, segsText()), interim);
       armSilence();
     };
     recog.onerror = (ev) => {
@@ -1727,7 +1743,7 @@
       // Fin de session (fréquent sur mobile) : on fige ce qui a été reconnu, puis on
       // repart avec des index remis à zéro — sans quoi les segments se dupliquaient.
       const cur = segsText();
-      if (cur) finalBuf = (finalBuf + ' ' + cur).replace(/\s+/g, ' ').trim();
+      if (cur) finalBuf = fusionner(finalBuf, cur);
       segs = {};
       if (!sttServeur && conversing && phase === 'listening') { try { recog.start(); } catch (e) {} }
     };

@@ -145,9 +145,9 @@
     border-radius:10px; text-align:left}
   .llm-privacy.ue{background:#ecfdf5; color:#065f46}
   .llm-privacy.hors-ue{background:#fff7ed; color:#9a3412}
-  #llmKey, #llmModel{width:100%; padding:11px 13px; border:1px solid #e5e7eb; border-radius:12px;
+  #llmKey, #llmModel, #svcToken, #svcParent{width:100%; padding:11px 13px; border:1px solid #e5e7eb; border-radius:12px;
     font:inherit; font-size:14px; margin-bottom:8px; outline:none; background:#fff}
-  #llmKey:focus, #llmModel:focus{border-color:var(--accent)}
+  #llmKey:focus, #llmModel:focus, #svcToken:focus, #svcParent:focus{border-color:var(--accent)}
   .llm-actions{display:flex; gap:8px}
   .llm-actions .conn-btn{flex:1}
   .skill-view{white-space:pre-wrap; font:inherit; font-size:13px; line-height:1.55; color:#374151;
@@ -352,6 +352,18 @@
         <button id="connClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
       </div>
       <p class="sheet-sub">Connecte tes comptes : VindIA n'accède qu'à <b>tes</b> données, en lecture seule.</p>
+      <div id="svcList" class="conn-list"></div>
+      <div id="svcForm" hidden>
+        <div id="svcSteps" class="llm-steps"></div>
+        <p class="llm-privacy hors-ue" id="svcPiege"></p>
+        <input id="svcToken" type="password" placeholder="Colle ton jeton ici" autocomplete="off" />
+        <input id="svcParent" type="text" placeholder="Adresse de la page où ranger les documents" />
+        <p class="sheet-note" id="svcParentAide"></p>
+        <div class="llm-actions">
+          <button id="svcSave" class="conn-btn" type="button">Brancher</button>
+          <button id="svcCancel" class="conn-btn off" type="button">Annuler</button>
+        </div>
+      </div>
       <div id="connList" class="conn-list"></div>
       <p class="sheet-note" id="connNote"></p>
     </div>
@@ -471,6 +483,8 @@
         // dossiers de l'ordinateur, donc l'admin en a besoin autant que les autres.
         $('projbar').hidden = false;
         $('filesBtn').hidden = false;
+        // Le bouton était masqué en dur : l'écran Connexions restait inaccessible.
+        $('connectionsBtn').hidden = false;
         sub.textContent = _displayName ? 'Bonjour ' + _displayName + ' — VindIA est prêt' : 'Assistant vocal — en français';
         if (d.has_memory) hint.textContent = "Je me souviens de nos échanges précédents. Appuie pour commencer.";
         hideLogin(); pendingScreen.hidden = true;
@@ -1218,7 +1232,69 @@
     } catch (e) { connNote.textContent = e.message; }
   }
 
-  $('connectionsBtn').addEventListener('click', () => { connOverlay.hidden = false; renderConnections(); });
+  // ── Services à jeton (Notion…) : chacun branche LE SIEN ────────────────────
+  let _svcChoisi = null;
+
+  async function renderServices() {
+    const zone = $('svcList'), form = $('svcForm');
+    zone.innerHTML = ''; form.hidden = true; _svcChoisi = null;
+    let d;
+    try { d = await projApi('/connect/catalogue'); } catch (e) { return; }
+    const branches = {};
+    (d.branches || []).forEach(b => { branches[b.code] = b; });
+    (d.services || []).forEach(svc => {
+      const row = document.createElement('div'); row.className = 'conn-row';
+      const left = document.createElement('div');
+      const nom = document.createElement('div'); nom.className = 'conn-name'; nom.textContent = svc.nom;
+      const meta = document.createElement('div'); meta.className = 'conn-meta';
+      const b = branches[svc.code];
+      meta.textContent = b
+        ? (b.ecriture ? 'Branché — lecture et dépôt de documents' : 'Branché — lecture seule')
+        : svc.resume;
+      left.appendChild(nom); left.appendChild(meta);
+      const btn = document.createElement('button'); btn.className = 'conn-btn off';
+      btn.textContent = b ? 'Débrancher' : 'Brancher';
+      btn.onclick = b
+        ? async () => { await projApi('/connect/remove', { service: svc.code }); await renderServices(); }
+        : () => ouvrirSvc(svc);
+      row.appendChild(left); row.appendChild(btn);
+      zone.appendChild(row);
+    });
+  }
+
+  function ouvrirSvc(svc) {
+    _svcChoisi = svc;
+    $('svcList').hidden = true; $('svcForm').hidden = false; $('svcNote').textContent = '';
+    $('svcSteps').innerHTML =
+      '<strong>Brancher ' + svc.nom + '</strong><ol>' + svc.etapes.map(e => '<li>' + e + '</li>').join('') + '</ol>'
+      + '<p style="margin:10px 0 0"><a href="' + svc.console_url + '" target="_blank" rel="noopener">Ouvrir ' + svc.nom + '</a></p>';
+    $('svcPiege').textContent = 'À ne pas oublier : ' + svc.piege;
+    $('svcToken').value = '';
+    $('svcParent').value = '';
+    $('svcParent').hidden = !svc.page_accueil;
+    $('svcParentAide').textContent = svc.page_accueil || '';
+    $('svcParentAide').hidden = !svc.page_accueil;
+  }
+
+  function fermerSvc() { $('svcForm').hidden = true; $('svcList').hidden = false; _svcChoisi = null; }
+
+  $('svcCancel').addEventListener('click', fermerSvc);
+  $('svcSave').addEventListener('click', async () => {
+    if (!_svcChoisi) return;
+    const note = $('svcNote'); note.textContent = 'Enregistrement…';
+    try {
+      const d = await projApi('/connect/save', {
+        service: _svcChoisi.code, token: $('svcToken').value, parent: $('svcParent').value,
+      });
+      if (d && d.error) { note.textContent = d.error; return; }
+      const nom = _svcChoisi.nom;
+      fermerSvc(); await renderServices();
+      addLine('ai', nom + ' est branché. Je peux consulter tes pages'
+        + (d.ecriture ? ' et y déposer ce que je produis.' : '.'));
+    } catch (e) { note.textContent = e.message; }
+  });
+
+  $('connectionsBtn').addEventListener('click', () => { connOverlay.hidden = false; renderServices(); renderConnections(); });
   $('connClose').addEventListener('click', () => { connOverlay.hidden = true; });
   connOverlay.addEventListener('click', (e) => { if (e.target === connOverlay) connOverlay.hidden = true; });
 

@@ -39,7 +39,10 @@ from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
+from shared.agent.connectors import (catalogue as connecteurs_catalogue, get_connecteur,
+                                     page_id_depuis_url, vault_service, verifie_jeton)
 from shared.agent.llm_transports import build_transports
+from shared.agent.notion_tools import build_notion_tools
 from shared.agent.providers import VAULT_SERVICE, catalogue, get_provider, verifie_cle
 from shared.agent.skill_tools import build_skill_tools
 from shared.agent.skills import SkillStore
@@ -404,6 +407,7 @@ async def ask(request: web.Request) -> web.Response:
     if _sync is not None:
         allowed = active_proj.workspaces if (active_proj and active_proj.workspaces) else None
         session_tools += build_workspace_tools(_sync, member_id, allowed)
+    session_tools += _outils_connectes(member_id)
     if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement
     if ident["admin"]:
@@ -530,6 +534,21 @@ async def projects_create(request: web.Request) -> web.Response:
     return web.json_response({"project": proj.as_dict()})
 
 
+def _outils_connectes(member_id: str) -> list:
+    """Outils des services que CE membre a branchés (Notion…), et eux seuls.
+
+    Aucun accès n'est hérité : le jeton vient du coffre du membre, et les outils sont
+    construits pour ce jeton. Un autre utilisateur branchera son propre espace.
+    """
+    if _vault is None:
+        return []
+    outils = []
+    secrets = _vault.get_secrets(member_id, vault_service("notion")) or {}
+    if secrets.get("token"):
+        outils += build_notion_tools(secrets["token"], parent_id=secrets.get("parent") or "")
+    return outils
+
+
 def _transports_du_membre(member_id: str):
     """(texte, outils) bâtis sur la clé du membre, ou None s'il n'en a pas posé.
 
@@ -600,6 +619,65 @@ def _vers_mp3(data: bytes) -> bytes:
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError((proc.stderr or b"").decode("utf-8", "replace")[:160] or "conversion échouée")
     return proc.stdout
+
+
+async def connect_catalogue(request: web.Request) -> web.Response:
+    """POST /connect/catalogue → services branchables + ceux déjà branchés."""
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    branches = []
+    if _vault is not None:
+        for c in connecteurs_catalogue():
+            sec = _vault.get_secrets(ident["member_id"], vault_service(c["code"])) or {}
+            if sec.get("token"):
+                # On dit ce qui est branché et si l'écriture est possible — jamais le jeton.
+                branches.append({"code": c["code"], "ecriture": bool(sec.get("parent"))})
+    return web.json_response({"services": connecteurs_catalogue(), "branches": branches})
+
+
+async def connect_save(request: web.Request) -> web.Response:
+    """POST /connect/save {service, token} → range le jeton dans le coffre du membre."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    if _vault is None:
+        return web.json_response({"error": "coffre indisponible"}, status=503)
+    code = (data.get("service") or "").strip().lower()
+    jeton = (data.get("token") or "").strip()
+    probleme = verifie_jeton(code, jeton)
+    if probleme:
+        return web.json_response({"error": probleme}, status=400)
+    # Page de dépôt : collée telle quelle depuis le navigateur. Sans elle, VindIA
+    # lit mais n'écrit pas — elle n'aurait aucun endroit légitime où créer.
+    parent = page_id_depuis_url(data.get("parent") or "")
+    if (data.get("parent") or "").strip() and not parent:
+        return web.json_response(
+            {"error": "Adresse de page Notion non reconnue. Copie le lien depuis Notion."},
+            status=400)
+    _vault.store(ident["member_id"], vault_service(code),
+                 {"token": jeton, "parent": parent},
+                 {"service": code, "a_page_depot": bool(parent)})
+    return web.json_response({"ok": True, "service": get_connecteur(code).nom,
+                              "ecriture": bool(parent)})
+
+
+async def connect_remove(request: web.Request) -> web.Response:
+    """POST /connect/remove {service} → débranche le service."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident, err = await _require_approved(request)
+    if err:
+        return err
+    code = (data.get("service") or "").strip().lower()
+    ok = _vault.delete(ident["member_id"], vault_service(code)) if _vault else False
+    return web.json_response({"ok": bool(ok)})
 
 
 async def llm_catalogue(request: web.Request) -> web.Response:
@@ -1130,6 +1208,9 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/projects/folders", project_folders)
     app.router.add_post("/stt", stt)
+    app.router.add_post("/connect/catalogue", connect_catalogue)
+    app.router.add_post("/connect/save", connect_save)
+    app.router.add_post("/connect/remove", connect_remove)
     app.router.add_post("/llm/catalogue", llm_catalogue)
     app.router.add_post("/llm/connect", llm_connect)
     app.router.add_post("/llm/disconnect", llm_disconnect)

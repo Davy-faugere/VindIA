@@ -63,3 +63,38 @@ class SignupMessageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecisionTest(unittest.TestCase):
+    """Message envoyé À LA PERSONNE après validation ou refus."""
+
+    def test_validation_dit_quoi_faire(self):
+        from shared.agent.email_notify import decision_message
+        sujet, corps = decision_message(True, "https://vindia.example")
+        self.assertIn("validé", corps)
+        self.assertIn("connecter", corps)          # l'action à faire maintenant
+        self.assertIn("https://vindia.example", corps)
+
+    def test_refus_est_sobre_et_rassurant(self):
+        from shared.agent.email_notify import decision_message
+        sujet, corps = decision_message(False)
+        self.assertIn("pas été retenue", corps)
+        self.assertNotIn("validé", corps)
+        self.assertIn("Aucune donnée", corps)      # ce qu'on fait de ses données
+
+    def test_envoi_a_un_destinataire_precis(self):
+        seen = {}
+
+        async def send(to, subject, body):
+            seen.update(to=to)
+
+        # Sans ce chemin, le message de validation partirait à l'ADMIN, pas à la
+        # personne concernée.
+        asyncio.run(_notifier(send).notify("s", "b", to=["nouveau@exemple.fr"]))
+        self.assertEqual(seen["to"], ["nouveau@exemple.fr"])
+
+    def test_destinataire_vide_n_envoie_rien(self):
+        async def send(*a):  # pragma: no cover
+            raise AssertionError("aucun envoi sans destinataire")
+
+        self.assertFalse(asyncio.run(_notifier(send).notify("s", "b", to=[])))

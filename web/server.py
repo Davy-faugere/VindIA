@@ -38,7 +38,7 @@ from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
 from shared.agent.approvals import ApprovalStore, APPROVED
 from shared.agent.telegram_notify import build_telegram_notifier
-from shared.agent.email_notify import build_email_notifier, signup_message
+from shared.agent.email_notify import build_email_notifier, decision_message, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
 from shared.agent.connectors import (catalogue as connecteurs_catalogue, get_connecteur,
                                      page_id_depuis_url, vault_service, verifie_jeton)
@@ -1149,8 +1149,18 @@ async def admin_decide(request: web.Request) -> web.Response:
         return web.json_response({"error": "réservé à l'administrateur"}, status=403)
     target = (data.get("member_id") or "").strip()
     approve = bool(data.get("approve"))
+    # L'adresse est lue AVANT la décision : après, l'enregistrement peut avoir changé.
+    dossier = _approvals.get(target) if _approvals else None
+    email_cible = (dossier or {}).get("email") or ""
     ok = _approvals.decide(target, approve) if _approvals else False
-    return web.json_response({"ok": ok, "decision": "approved" if approve else "refused"})
+    # Prévenir la personne : sans cela, quelqu'un dont le compte vient d'être validé
+    # n'en sait rien et devrait revenir essayer au hasard.
+    prevenu = False
+    if ok and email_cible and _email is not None:
+        sujet, corps = decision_message(approve, _PUBLIC_URL)
+        prevenu = await _email.notify(sujet, corps, to=[email_cible])
+    return web.json_response({"ok": ok, "decision": "approved" if approve else "refused",
+                              "personne_prevenue": prevenu})
 
 
 

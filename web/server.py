@@ -1132,8 +1132,14 @@ async def admin_pending(request: web.Request) -> web.Response:
         return web.json_response({"error": "non authentifié"}, status=401)
     if not ident.get("admin"):
         return web.json_response({"error": "réservé à l'administrateur"}, status=403)
-    pending = _approvals.list_by_status("pending") if _approvals else []
-    return web.json_response({"pending": pending})
+    # On renvoie TOUS les comptes, pas seulement ceux en attente : n'afficher que
+    # l'attente donnait un écran vide dès la dernière validation, sans qu'on sache
+    # si la décision avait été prise ou si l'écran était cassé.
+    if _approvals is None:
+        return web.json_response({"pending": [], "comptes": []})
+    attente = _approvals.list_by_status("pending")
+    comptes = attente + _approvals.list_by_status("approved") + _approvals.list_by_status("refused")
+    return web.json_response({"pending": attente, "comptes": comptes})
 
 
 async def admin_decide(request: web.Request) -> web.Response:

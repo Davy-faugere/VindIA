@@ -1434,24 +1434,40 @@
     adminNote.textContent = ''; adminList.innerHTML = '';
     try {
       const d = await projApi('/admin/pending');
-      const items = d.pending || [];
-      if (!items.length) { adminNote.textContent = "Aucun compte en attente."; return; }
+      const items = d.comptes || d.pending || [];
+      const attente = (d.pending || []).length;
+      if (!items.length) { adminNote.textContent = "Aucun compte pour l'instant."; return; }
+      adminNote.textContent = attente
+        ? attente + " compte(s) en attente de ta décision."
+        : "Aucun compte en attente — tout est traité.";
       items.forEach(u => {
         const row = document.createElement('div'); row.className = 'conn-row';
         const left = document.createElement('div');
         const name = document.createElement('div'); name.className = 'conn-name'; name.textContent = u.email || u.member_id;
-        const m = document.createElement('div'); m.className = 'conn-meta'; m.textContent = 'demandé le ' + (u.requested_at || '').slice(0, 10);
+        const etat = { pending: 'en attente de ta décision',
+                       approved: 'accès ouvert', refused: 'refusé' }[u.status] || u.status;
+        const m = document.createElement('div'); m.className = 'conn-meta';
+        m.textContent = etat + ' · demandé le ' + (u.requested_at || '').slice(0, 10);
         left.appendChild(name); left.appendChild(m);
         const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.gap = '6px';
-        const ok = document.createElement('button'); ok.className = 'conn-btn'; ok.textContent = 'Approuver';
-        const no = document.createElement('button'); no.className = 'conn-btn off'; no.textContent = 'Refuser';
-        const decide = async (approve) => {
-          ok.disabled = no.disabled = true;
+        const decide = async (approve, boutons) => {
+          boutons.forEach(b => { b.disabled = true; });
           try { await projApi('/admin/decide', { member_id: u.member_id, approve }); await renderAdmin(); }
-          catch (e) { adminNote.textContent = e.message; ok.disabled = no.disabled = false; }
+          catch (e) { adminNote.textContent = e.message; boutons.forEach(b => { b.disabled = false; }); }
         };
-        ok.onclick = () => decide(true); no.onclick = () => decide(false);
-        wrap.appendChild(ok); wrap.appendChild(no);
+        if (u.status === 'pending') {
+          const ok = document.createElement('button'); ok.className = 'conn-btn'; ok.textContent = 'Approuver';
+          const no = document.createElement('button'); no.className = 'conn-btn off'; no.textContent = 'Refuser';
+          ok.onclick = () => decide(true, [ok, no]); no.onclick = () => decide(false, [ok, no]);
+          wrap.appendChild(ok); wrap.appendChild(no);
+        } else {
+          // Une décision reste réversible : un accès ouvert par erreur doit pouvoir
+          // être retiré sans passer par le serveur.
+          const inv = document.createElement('button'); inv.className = 'conn-btn off';
+          inv.textContent = u.status === 'approved' ? 'Retirer l\'accès' : 'Ouvrir l\'accès';
+          inv.onclick = () => decide(u.status !== 'approved', [inv]);
+          wrap.appendChild(inv);
+        }
         row.appendChild(left); row.appendChild(wrap);
         adminList.appendChild(row);
       });

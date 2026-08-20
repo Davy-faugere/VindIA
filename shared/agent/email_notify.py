@@ -44,13 +44,18 @@ class EmailNotifier:
     def configured(self) -> bool:
         return bool(self._host and self._user and self._password and self._to)
 
-    async def notify(self, subject: str, body: str) -> bool:
-        """Envoie un e-mail. Retourne False sans lever si l'envoi échoue."""
-        if not self.configured:
+    async def notify(self, subject: str, body: str, to: Optional[List[str]] = None) -> bool:
+        """Envoie un e-mail. Retourne False sans lever si l'envoi échoue.
+
+        `to` permet d'écrire à quelqu'un d'AUTRE que l'administrateur — par exemple
+        à la personne dont le compte vient d'être validé.
+        """
+        destinataires = [d.strip() for d in (to if to is not None else self._to) if d and d.strip()]
+        if not (self._host and self._user and self._password and destinataires):
             return False
         send = self._send or self._live_send()
         try:
-            await send(self._to, subject, body)
+            await send(destinataires, subject, body)
             return True
         except Exception as exc:  # noqa: BLE001 - une alerte ratée ne casse pas le login
             print(f"[VindIA] e-mail non envoyé : {exc}")
@@ -125,3 +130,34 @@ def signup_message(email: str, member_id: str, public_url: str = "") -> tuple:
     if public_url:
         lines += ["", public_url]
     return subject, "\n".join(lines)
+
+
+def decision_message(approuve: bool, public_url: str = "") -> tuple:
+    """Sujet et corps du message envoyé À LA PERSONNE après décision.
+
+    Sans ce message, quelqu'un dont le compte vient d'être validé n'en sait rien :
+    il devrait revenir essayer au hasard. Un refus mérite aussi une réponse, plutôt
+    qu'un silence indéfini.
+    """
+    if approuve:
+        sujet = "VindIA — ton accès est ouvert"
+        lignes = [
+            "Bonne nouvelle : ton compte VindIA vient d'être validé.",
+            "",
+            "Tu peux te connecter dès maintenant avec l'adresse et le mot de passe "
+            "choisis à l'inscription.",
+            "",
+            "VindIA est une assistante vocale : tu lui parles, elle répond et peut "
+            "rédiger des documents pour toi. Rien de ce que tu déposes n'est "
+            "accessible aux autres utilisateurs.",
+        ]
+    else:
+        sujet = "VindIA — demande d'accès non retenue"
+        lignes = [
+            "Ta demande d'accès à VindIA n'a pas été retenue.",
+            "",
+            "Aucune donnée te concernant n'est conservée dans l'application.",
+        ]
+    if public_url:
+        lignes += ["", public_url]
+    return sujet, "\n".join(lignes)

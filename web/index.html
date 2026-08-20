@@ -612,6 +612,16 @@
           err.style.color = '#15803d';
           err.textContent = "Compte créé ! Vérifie tes e-mails pour confirmer, puis connecte-toi.";
           setSignupMode(false);
+          // Prévient l'administrateur TOUT DE SUITE. Sans cet appel, il n'est
+          // averti qu'à la première connexion : quelqu'un qui s'inscrit et ne
+          // revient jamais resterait invisible. Sans effet sur l'inscription
+          // elle-même si l'appel échoue.
+          try {
+            await fetch('/signup/notify', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email, member_id: (data.user && data.user.id) || '' })
+            });
+          } catch (e) { /* l'inscription reste valable */ }
         }
       } else {
         const { error } = await sb.auth.signInWithPassword({ email, password: pass });

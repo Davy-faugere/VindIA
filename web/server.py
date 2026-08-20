@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import re
 import secrets as _secrets
 import sys
 import time
@@ -565,6 +566,60 @@ def _transports_du_membre(member_id: str):
         return None
     modele = (secrets.get("model") or "").strip() or p.modele_defaut
     return build_transports(p.famille, p.base_url, secrets["api_key"], modele)
+
+
+# Alerte à l'INSCRIPTION, pas à la première connexion. L'inscription se fait chez
+# Supabase, directement depuis la page : le serveur n'en sait rien tant que la
+# personne ne s'est pas connectée. Quelqu'un qui s'inscrit puis ne revient jamais
+# resterait donc invisible — c'est arrivé.
+# Cet endpoint est forcément ANONYME (aucune session tant que l'adresse n'est pas
+# confirmée), d'où une limite stricte par adresse IP : sans elle, il suffirait de
+# le découvrir pour inonder la boîte de l'administrateur.
+_SIGNUP_LIMIT = 5           # inscriptions signalées par heure et par IP
+_signup_buckets: dict = defaultdict(list)
+
+
+def _check_rate_signup(ip: str) -> bool:
+    now = time.monotonic()
+    bucket = [t for t in _signup_buckets[ip] if now - t < _RATE_WINDOW]
+    if len(bucket) >= _SIGNUP_LIMIT:
+        _signup_buckets[ip] = bucket
+        return False
+    bucket.append(now)
+    _signup_buckets[ip] = bucket
+    return True
+
+
+async def signup_notify(request: web.Request) -> web.Response:
+    """POST /signup/notify {email, member_id} → enregistre la demande et alerte l'admin.
+
+    Appelé par la page juste après une inscription réussie.
+    """
+    ip = request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For", "") or "?"
+    ip = ip.split(",")[0].strip()
+    if not _check_rate_signup(ip):
+        return web.json_response({"error": "trop de demandes"}, status=429)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    _init_services()
+    email = (data.get("email") or "").strip().lower()[:200]
+    member_id = (data.get("member_id") or "").strip()[:36]
+    # On exige un identifiant Supabase plausible : la page le reçoit à l'inscription.
+    # Sans lui, n'importe quel formulaire forgé déclencherait une alerte.
+    if not email or "@" not in email or not re.match(r"^[0-9a-fA-F-]{36}$", member_id):
+        return web.json_response({"error": "demande invalide"}, status=400)
+    if _approvals is None:
+        return web.json_response({"ok": False}, status=503)
+    statut, nouveau = _approvals.request(member_id, email)
+    if nouveau:
+        if _telegram is not None:
+            await _telegram.notify(f"VindIA — nouvelle inscription en attente de validation : {email}")
+        if _email is not None:
+            sujet, corps = signup_message(email, member_id, _PUBLIC_URL)
+            await _email.notify(sujet, corps)
+    return web.json_response({"ok": True, "status": statut})
 
 
 async def stt(request: web.Request) -> web.Response:
@@ -1207,6 +1262,7 @@ def build_app() -> web.Application:
     app.router.add_post("/projects/activate", projects_activate)
     app.router.add_post("/projects/file", project_file)
     app.router.add_post("/projects/folders", project_folders)
+    app.router.add_post("/signup/notify", signup_notify)
     app.router.add_post("/stt", stt)
     app.router.add_post("/connect/catalogue", connect_catalogue)
     app.router.add_post("/connect/save", connect_save)

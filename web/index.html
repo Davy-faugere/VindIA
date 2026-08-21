@@ -399,10 +399,13 @@
       <div class="brand"><span class="dot"></span><h1>VindIA</h1></div>
       <p class="ai-notice">VindIA est un assistant <b>propulsé par intelligence artificielle</b>. Tu échanges avec une IA, pas avec une personne. Ses réponses peuvent comporter des erreurs : vérifie les informations importantes.</p>
       <p class="sub" id="loginSub">Connecte-toi pour continuer</p>
+      <input id="signPrenom" type="text" placeholder="Prénom" autocomplete="given-name" hidden />
+      <input id="signNom" type="text" placeholder="Nom" autocomplete="family-name" hidden />
       <input id="loginEmail" type="email" placeholder="Adresse e-mail" autocomplete="username" required />
       <input id="loginPass" type="password" placeholder="Mot de passe" autocomplete="current-password" required />
       <div id="pwMeter" class="pw" hidden><span id="pwBar"></span></div>
       <p id="pwHint" class="pw-hint" hidden>12 caractères minimum, avec au moins une majuscule, un chiffre et un caractère spécial.</p>
+      <input id="signPass2" type="password" placeholder="Confirme ton mot de passe" autocomplete="new-password" hidden />
       <button id="loginBtn" type="submit">Se connecter</button>
       <p class="login-err" id="loginErr"></p>
       <button id="loginToggle" type="button" class="switch" style="margin-top:6px">Pas de compte ? Créer un compte</button>
@@ -546,6 +549,9 @@
     $('loginToggle').textContent = on ? "J'ai déjà un compte" : 'Pas de compte ? Créer un compte';
     $('loginPass').setAttribute('autocomplete', on ? 'new-password' : 'current-password');
     $('pwMeter').hidden = !on; $('pwHint').hidden = !on;   // exigences visibles à l'inscription
+    // Prénom, nom et confirmation n'ont de sens qu'à l'inscription.
+    ['signPrenom', 'signNom', 'signPass2'].forEach(id => { $(id).hidden = !on; });
+    if (!on) { $('signPrenom').value = ''; $('signNom').value = ''; $('signPass2').value = ''; }
     $('loginErr').textContent = ''; $('loginErr').style.color = '';
   }
   $('loginToggle').addEventListener('click', () => setSignupMode(!_signupMode));
@@ -599,7 +605,18 @@
           err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial.";
           return;
         }
-        const { data, error } = await sb.auth.signUp({ email, password: pass });
+        const prenom = $('signPrenom').value.trim(), nom = $('signNom').value.trim();
+        if (!prenom) { err.textContent = "Indique ton prénom."; return; }
+        // Deux saisies : une faute de frappe dans un champ masqué condamne le compte
+        // à un « mot de passe oublié » dès la première connexion.
+        if (pass !== $('signPass2').value) {
+          err.textContent = "Les deux mots de passe ne sont pas identiques.";
+          return;
+        }
+        const { data, error } = await sb.auth.signUp({
+          email, password: pass,
+          options: { data: { prenom: prenom, nom: nom } },
+        });
         if (error) { err.textContent = frError(error.message); }
         else if (data && data.user && data.user.identities && data.user.identities.length === 0) {
           // Supabase renvoie un utilisateur sans identité quand l'adresse existe déjà :
@@ -1487,6 +1504,28 @@
           inv.onclick = () => decide(u.status !== 'approved', [inv]);
           wrap.appendChild(inv);
         }
+        // Débloquer quelqu'un sans lui téléphoner : relancer la confirmation, ou lui
+        // envoyer un lien de mot de passe. Sans ces boutons, une personne coincée
+        // reste coincée et on n'en sait rien.
+        const relancer = (genre, bouton, libelleEnCours) => async () => {
+          bouton.disabled = true; adminNote.textContent = libelleEnCours;
+          try {
+            const r = await projApi('/admin/relancer', { member_id: u.member_id, type: genre });
+            adminNote.textContent = (r && (r.error || r.message)) || 'Envoyé.';
+          } catch (e) { adminNote.textContent = e.message; }
+          bouton.disabled = false;
+        };
+        if (!u.adresse_confirmee) {
+          const b = document.createElement('button'); b.className = 'conn-btn off';
+          b.textContent = 'Relancer la confirmation';
+          b.onclick = relancer('confirmation', b, 'Envoi de la confirmation…');
+          wrap.appendChild(b);
+        }
+        const mp = document.createElement('button'); mp.className = 'conn-btn off';
+        mp.textContent = 'Lien mot de passe';
+        mp.onclick = relancer('motdepasse', mp, 'Envoi du lien…');
+        wrap.appendChild(mp);
+        wrap.style.flexWrap = 'wrap';
         row.appendChild(left); row.appendChild(wrap);
         adminList.appendChild(row);
       });

@@ -316,7 +316,7 @@ async def auth(request: web.Request) -> web.Response:
     if not ident.get("approved"):
         return web.json_response({
             "ok": True, "approved": False, "status": ident.get("status"),
-            "display_name": (ident.get("email") or "").split("@")[0] or "toi",
+            "display_name": ident.get("prenom") or (ident.get("email") or "").split("@")[0] or "toi",
             "admin": False,
         })
     has_memory = False
@@ -591,6 +591,53 @@ def _check_rate_signup(ip: str) -> bool:
     bucket.append(now)
     _signup_buckets[ip] = bucket
     return True
+
+
+async def admin_relancer(request: web.Request) -> web.Response:
+    """POST /admin/relancer {member_id, type} → renvoie un e-mail à la personne.
+
+    `type` = "confirmation" (relancer la confirmation d'adresse) ou "motdepasse"
+    (lien de réinitialisation). Quelqu'un qui n'a jamais confirmé, ou qui a oublié
+    son mot de passe, est aujourd'hui bloqué sans recours visible côté administrateur.
+    Les deux passent par les points d'entrée PUBLICS de Supabase : aucune clé
+    d'administration n'est nécessaire, donc aucun secret supplémentaire à héberger.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    if not ident.get("admin"):
+        return web.json_response({"error": "réservé à l'administrateur"}, status=403)
+    dossier = _approvals.get((data.get("member_id") or "").strip()) if _approvals else None
+    email = (dossier or {}).get("email") or ""
+    if not email:
+        return web.json_response({"error": "compte inconnu"}, status=404)
+    genre = (data.get("type") or "confirmation").strip()
+    chemin = "/auth/v1/recover" if genre == "motdepasse" else "/auth/v1/resend"
+    corps = ({"email": email} if genre == "motdepasse"
+             else {"type": "signup", "email": email})
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{_SUPABASE_URL}{chemin}",
+                json=corps,
+                headers={"apikey": _SUPABASE_ANON, "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status >= 400:
+                    detail = (await resp.text())[:160]
+                    return web.json_response(
+                        {"error": f"Supabase a refusé l'envoi ({resp.status}). {detail}"},
+                        status=502)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": f"envoi impossible : {str(exc)[:140]}"}, status=502)
+    quoi = "lien de réinitialisation" if genre == "motdepasse" else "e-mail de confirmation"
+    return web.json_response({"ok": True, "message": f"{quoi.capitalize()} renvoyé à {email}."})
 
 
 async def signup_notify(request: web.Request) -> web.Response:
@@ -1315,6 +1362,7 @@ def build_app() -> web.Application:
     app.router.add_post("/memory/forget", memory_forget)
     app.router.add_post("/admin/pending", admin_pending)
     app.router.add_post("/admin/decide", admin_decide)
+    app.router.add_post("/admin/relancer", admin_relancer)
     app.router.add_post("/oauth/google/start", oauth_google_start)
     app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/{name}", static_file)

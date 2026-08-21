@@ -67,10 +67,17 @@ class SupabaseAuth:
         if status != 200 or not isinstance(data, dict) or not data.get("id"):
             return None
         email = (data.get("email") or "").strip().lower()
+        # Prénom et nom saisis à l'inscription. Sans eux, l'application appelait les
+        # gens par le début de leur adresse — « Bonjour faugredavy ».
+        meta = data.get("user_metadata") or {}
+        prenom = str(meta.get("prenom") or "").strip()[:60]
+        nom = str(meta.get("nom") or "").strip()[:60]
         identity = {
             "member_id": str(data["id"]),
             "email": email,
             "admin": email in self._admins,
+            "prenom": prenom,
+            "nom": nom,
         }
         self._cache[token] = (identity, now + self._ttl)
         return identity

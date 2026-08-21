@@ -1448,11 +1448,30 @@
                        approved: 'accès ouvert', refused: 'refusé' }[u.status] || u.status;
         const m = document.createElement('div'); m.className = 'conn-meta';
         m.textContent = etat + ' · demandé le ' + (u.requested_at || '').slice(0, 10);
-        left.appendChild(name); left.appendChild(m);
+        // L'état de l'adresse conditionne la décision : sans lui, on ouvre un accès
+        // à une boîte que personne n'a prouvé posséder.
+        const adr = document.createElement('div'); adr.className = 'conn-meta';
+        if (u.adresse_confirmee) {
+          adr.textContent = 'adresse confirmée';
+          adr.style.color = '#15803d';
+        } else {
+          adr.textContent = 'ADRESSE NON CONFIRMÉE — jamais connecté';
+          adr.style.color = '#b45309'; adr.style.fontWeight = '600';
+        }
+        left.appendChild(name); left.appendChild(m); left.appendChild(adr);
         const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.gap = '6px';
         const decide = async (approve, boutons) => {
           boutons.forEach(b => { b.disabled = true; });
-          try { await projApi('/admin/decide', { member_id: u.member_id, approve }); await renderAdmin(); }
+          try {
+            const r = await projApi('/admin/decide', { member_id: u.member_id, approve });
+            // Le serveur refuse d'ouvrir un accès non confirmé : on affiche POURQUOI.
+            if (r && r.error) {
+              adminNote.textContent = r.error;
+              boutons.forEach(b => { b.disabled = false; });
+              return;
+            }
+            await renderAdmin();
+          }
           catch (e) { adminNote.textContent = e.message; boutons.forEach(b => { b.disabled = false; }); }
         };
         if (u.status === 'pending') {

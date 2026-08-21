@@ -483,6 +483,9 @@ async def _identify(request: web.Request):
         ident["status"], ident["approved"] = APPROVED, True
     else:
         status, is_new = _approvals.request(ident["member_id"], ident.get("email") or "")
+        # Arriver ici signifie que Supabase a validé un jeton — donc que l'adresse a
+        # été confirmée. C'est la seule preuve dont on dispose côté serveur.
+        _approvals.marquer_adresse_confirmee(ident["member_id"])
         ident["status"], ident["approved"] = status, (status == APPROVED)
         if is_new:
             # Alerter l'administrateur : sans cela une inscription passe inaperçue et
@@ -1142,6 +1145,7 @@ async def admin_pending(request: web.Request) -> web.Response:
     return web.json_response({"pending": attente, "comptes": comptes})
 
 
+
 async def admin_decide(request: web.Request) -> web.Response:
     """POST /admin/decide {member_id, approve:bool} → valide ou refuse un compte. Admin only."""
     try:
@@ -1158,6 +1162,16 @@ async def admin_decide(request: web.Request) -> web.Response:
     # L'adresse est lue AVANT la décision : après, l'enregistrement peut avoir changé.
     dossier = _approvals.get(target) if _approvals else None
     email_cible = (dossier or {}).get("email") or ""
+    # Ouvrir un accès à une adresse jamais confirmée revient à faire confiance à une
+    # boîte que personne n'a prouvé posséder — elle peut même ne pas exister. Le
+    # refus est posé ICI, côté serveur : un clic accidentel ne suffit pas à passer.
+    if approve and dossier is not None and not dossier.get("adresse_confirmee"):
+        return web.json_response({
+            "error": "Cette adresse n'a jamais été confirmée : la personne ne s'est "
+                     "encore jamais connectée. Attends qu'elle clique le lien reçu "
+                     "par e-mail avant de lui ouvrir l'accès.",
+            "adresse_non_confirmee": True,
+        }, status=409)
     ok = _approvals.decide(target, approve) if _approvals else False
     # Prévenir la personne : sans cela, quelqu'un dont le compte vient d'être validé
     # n'en sait rien et devrait revenir essayer au hasard.

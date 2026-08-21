@@ -70,9 +70,29 @@ class ApprovalStore:
             "status": PENDING,
             "requested_at": ts,
             "decided_at": None,
+            # Supabase n'autorise la CONNEXION qu'après confirmation de l'adresse.
+            # Une inscription part donc à false ; se connecter un jour prouve que la
+            # personne possède bien cette boîte. Sans ce drapeau, l'administrateur
+            # ouvrait des accès à des adresses jamais vérifiées, voire inexistantes.
+            "adresse_confirmee": False,
         }
         self._path(member_id).write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
         return PENDING, True
+
+    def marquer_adresse_confirmee(self, member_id: str) -> bool:
+        """Appelé quand le membre se connecte : la connexion PROUVE qu'il a l'adresse."""
+        rec = self.get(member_id)
+        if rec is None or rec.get("adresse_confirmee"):
+            return False
+        rec["adresse_confirmee"] = True
+        self._path(member_id).write_text(
+            json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
+    def adresse_confirmee(self, member_id: str) -> bool:
+        rec = self.get(member_id)
+        # Les dossiers créés avant ce drapeau : on ne les déclare pas confirmés à tort.
+        return bool((rec or {}).get("adresse_confirmee"))
 
     def decide(self, member_id: str, approved: bool) -> bool:
         """Approuve ou refuse un membre. Retourne True si le membre existait."""

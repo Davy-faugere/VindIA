@@ -73,3 +73,47 @@ class ApprovalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdresseConfirmeeTest(unittest.TestCase):
+    """Garde-fou : on n'ouvre pas un accès à une adresse jamais prouvée."""
+
+    MID = "11111111-2222-3333-4444-555555555555"
+
+    def _store(self, tmp):
+        return ApprovalStore(tmp, clock=lambda: "2026-08-21T10:00:00")
+
+    def test_inscription_part_non_confirmee(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self._store(tmp)
+            a.request(self.MID, "inconnu@exemple.fr")
+            self.assertFalse(a.adresse_confirmee(self.MID))
+
+    def test_connexion_prouve_l_adresse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self._store(tmp)
+            a.request(self.MID, "vrai@exemple.fr")
+            self.assertTrue(a.marquer_adresse_confirmee(self.MID))
+            self.assertTrue(a.adresse_confirmee(self.MID))
+
+    def test_marquage_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self._store(tmp)
+            a.request(self.MID, "x@exemple.fr")
+            a.marquer_adresse_confirmee(self.MID)
+            self.assertFalse(a.marquer_adresse_confirmee(self.MID))   # déjà fait
+
+    def test_membre_inconnu_n_est_pas_confirme(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self._store(tmp)
+            # Un dossier absent ne doit pas être pris pour un compte vérifié.
+            self.assertFalse(a.adresse_confirmee(self.MID))
+            self.assertFalse(a.marquer_adresse_confirmee(self.MID))
+
+    def test_le_drapeau_survit_a_la_decision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self._store(tmp)
+            a.request(self.MID, "x@exemple.fr")
+            a.marquer_adresse_confirmee(self.MID)
+            a.decide(self.MID, True)
+            self.assertTrue(a.adresse_confirmee(self.MID))

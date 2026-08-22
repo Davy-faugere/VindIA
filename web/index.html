@@ -153,6 +153,11 @@
   .skill-view{white-space:pre-wrap; font:inherit; font-size:13px; line-height:1.55; color:#374151;
     background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin-top:12px;
     max-height:46vh; overflow:auto}
+  /* Message de l'administration : il porte des refus explicatifs. Discret et
+     place sous une liste longue, il tombait hors de l'ecran — le clic semblait
+     alors sans effet. */
+  #adminNote:not(:empty){background:#fff7ed; color:#9a3412; border:1px solid #fed7aa;
+    border-radius:10px; padding:9px 11px; margin:0 0 12px; font-size:13px; line-height:1.5}
   .skill-tag{font-size:11px; font-weight:600; color:var(--accent); letter-spacing:.03em}
   .conn-row{display:flex; align-items:center; justify-content:space-between; gap:10px;
     border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px}
@@ -385,12 +390,12 @@
   <div class="overlay" id="adminOverlay" hidden>
     <div class="sheet">
       <div class="sheet-head">
-        <span>Administration — comptes en attente</span>
+        <span>Administration — comptes</span>
         <button id="adminClose" class="sheet-x" type="button" aria-label="Fermer">×</button>
       </div>
-      <p class="sheet-sub">Valide ou refuse les nouveaux inscrits.</p>
-      <div id="adminList" class="conn-list"></div>
+      <p class="sheet-sub">Valide, refuse, ou débloque un compte.</p>
       <p class="sheet-note" id="adminNote"></p>
+      <div id="adminList" class="conn-list"></div>
     </div>
   </div>
 
@@ -1484,6 +1489,9 @@
             // Le serveur refuse d'ouvrir un accès non confirmé : on affiche POURQUOI.
             if (r && r.error) {
               adminNote.textContent = r.error;
+              // Remonter le panneau : sinon le message reste hors de vue.
+              const sh = adminOverlay.querySelector('.sheet');
+              if (sh) sh.scrollTop = 0;
               boutons.forEach(b => { b.disabled = false; });
               return;
             }

@@ -104,6 +104,21 @@ class ApprovalStore:
         self._path(member_id).write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
 
+    def supprimer(self, member_id: str) -> bool:
+        """Retire définitivement le dossier d'un compte.
+
+        Utilisé pour les inscriptions manifestement fausses (adresse inexistante,
+        robot). Le compte perd tout : il n'est plus ni approuvé, ni refusé, il
+        n'existe plus pour VindIA. S'il se reconnectait un jour, il repasserait par
+        la case « en attente » comme un nouveau venu — ce qui est le comportement
+        souhaitable, plutôt qu'un retour silencieux avec son ancien statut.
+        """
+        chemin = self._path(member_id)
+        if not chemin.is_file():
+            return False
+        chemin.unlink()
+        return True
+
     def list_by_status(self, status: str) -> List[dict]:
         if not self._base.exists():
             return []

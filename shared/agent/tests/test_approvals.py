@@ -117,3 +117,32 @@ class AdresseConfirmeeTest(unittest.TestCase):
             a.marquer_adresse_confirmee(self.MID)
             a.decide(self.MID, True)
             self.assertTrue(a.adresse_confirmee(self.MID))
+
+
+class SuppressionTest(unittest.TestCase):
+    MID = "99999999-8888-7777-6666-555555555555"
+
+    def test_supprime_le_dossier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = ApprovalStore(tmp, clock=lambda: "2026-08-22T10:00:00")
+            a.request(self.MID, "faux@exemple.fr")
+            self.assertTrue(a.supprimer(self.MID))
+            self.assertIsNone(a.get(self.MID))
+
+    def test_supprimer_deux_fois_est_sans_effet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = ApprovalStore(tmp, clock=lambda: "2026-08-22T10:00:00")
+            a.request(self.MID, "x@exemple.fr")
+            a.supprimer(self.MID)
+            self.assertFalse(a.supprimer(self.MID))
+
+    def test_un_compte_supprime_repasse_en_attente(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = ApprovalStore(tmp, clock=lambda: "2026-08-22T10:00:00")
+            a.request(self.MID, "x@exemple.fr")
+            a.decide(self.MID, True)
+            a.supprimer(self.MID)
+            # Un retour ne doit pas ressusciter l'ancien statut approuvé.
+            statut, nouveau = a.request(self.MID, "x@exemple.fr")
+            self.assertEqual(statut, PENDING)
+            self.assertTrue(nouveau)

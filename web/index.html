@@ -1533,6 +1533,22 @@
         mp.textContent = 'Lien mot de passe';
         mp.onclick = relancer('motdepasse', mp, 'Envoi du lien…');
         wrap.appendChild(mp);
+        // Retirer une inscription manifestement fausse. Irréversible : on demande
+        // confirmation, en nommant le compte pour éviter de supprimer le voisin.
+        const sup = document.createElement('button'); sup.className = 'conn-btn off';
+        sup.textContent = 'Supprimer'; sup.style.color = '#b91c1c';
+        sup.onclick = async () => {
+          if (!confirm('Retirer définitivement ' + (u.email || u.member_id) + ' ?\n\n'
+                     + "Ce compte disparaîtra de la liste et perdra tout accès.")) return;
+          sup.disabled = true; adminNote.textContent = 'Suppression…';
+          try {
+            const r = await projApi('/admin/supprimer', { member_id: u.member_id });
+            adminNote.textContent = (r && (r.error || r.message)) || 'Supprimé.';
+            const sh = adminOverlay.querySelector('.sheet'); if (sh) sh.scrollTop = 0;
+            await renderAdmin();
+          } catch (e) { adminNote.textContent = e.message; sup.disabled = false; }
+        };
+        wrap.appendChild(sup);
         wrap.style.flexWrap = 'wrap';
         row.appendChild(left); row.appendChild(wrap);
         adminList.appendChild(row);

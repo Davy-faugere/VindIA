@@ -593,6 +593,58 @@ def _check_rate_signup(ip: str) -> bool:
     return True
 
 
+async def admin_supprimer(request: web.Request) -> web.Response:
+    """POST /admin/supprimer {member_id} → retire le compte de la liste.
+
+    Le dossier VindIA est supprimé : le compte n'apparaît plus et n'a plus aucun
+    accès. Le compte d'authentification Supabase, lui, n'est effacé qu'à condition
+    de disposer d'une clé d'administration — on ne l'exige pas, car héberger cette
+    clé donnerait au serveur un pouvoir bien plus large que ce seul usage.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ident = await _identify(request)
+    if ident is None:
+        return web.json_response({"error": "non authentifié"}, status=401)
+    if not ident.get("admin"):
+        return web.json_response({"error": "réservé à l'administrateur"}, status=403)
+    cible = (data.get("member_id") or "").strip()
+    if cible == ident["member_id"]:
+        return web.json_response({"error": "tu ne peux pas supprimer ton propre compte"}, status=400)
+    dossier = _approvals.get(cible) if _approvals else None
+    if dossier is None:
+        return web.json_response({"error": "compte inconnu"}, status=404)
+    email = dossier.get("email") or ""
+    _approvals.supprimer(cible)
+
+    # Suppression chez Supabase : seulement si une clé d'administration est fournie.
+    supprime_partout = False
+    cle_admin = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    if cle_admin:
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as sess:
+                async with sess.delete(
+                    f"{_SUPABASE_URL}/auth/v1/admin/users/{cible}",
+                    headers={"apikey": cle_admin, "Authorization": f"Bearer {cle_admin}"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    supprime_partout = resp.status < 300
+        except Exception:
+            supprime_partout = False
+
+    return web.json_response({
+        "ok": True, "email": email, "supprime_partout": supprime_partout,
+        "message": (f"{email} supprimé définitivement."
+                    if supprime_partout
+                    else f"{email} retiré de VindIA — il n'a plus aucun accès. "
+                         "Son compte de connexion subsiste chez Supabase."),
+    })
+
+
 async def admin_relancer(request: web.Request) -> web.Response:
     """POST /admin/relancer {member_id, type} → renvoie un e-mail à la personne.
 
@@ -1363,6 +1415,7 @@ def build_app() -> web.Application:
     app.router.add_post("/admin/pending", admin_pending)
     app.router.add_post("/admin/decide", admin_decide)
     app.router.add_post("/admin/relancer", admin_relancer)
+    app.router.add_post("/admin/supprimer", admin_supprimer)
     app.router.add_post("/oauth/google/start", oauth_google_start)
     app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/{name}", static_file)

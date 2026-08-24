@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import zipfile
 from pathlib import Path
 
 _DEJAVU = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -92,6 +93,8 @@ OFFICE_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "pdf": "application/pdf",
+    "odt": "application/vnd.oasis.opendocument.text",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
 }
 
 
@@ -427,11 +430,247 @@ def _pdf_table(pdf, rows) -> None:
     pdf.ln(2)
 
 
+# --------------------------------------------------------------------------- #
+#  OpenDocument (LibreOffice) — .odt et .ods
+# --------------------------------------------------------------------------- #
+#
+# Un fichier ODF est une archive ZIP de XML : la bibliothèque standard suffit, aucune
+# dépendance à installer. Sans ces deux constructeurs, un .odt demandé était refusé et
+# la page basculait sur du texte brut — l'utilisateur recevait son markdown non
+# converti, « # Titre » et « **gras** » compris.
+
+_ODF_NS = (
+    'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+    'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" '
+    'xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" '
+    'office:version="1.2"'
+)
+
+# Styles portés par le document lui-même : ne dépendre d'aucun modèle extérieur, sinon
+# les titres retombent en corps de texte selon la version de LibreOffice.
+_ODF_STYLES = """<office:automatic-styles>
+ <style:style style:name="TITRE1" style:family="paragraph">
+  <style:paragraph-properties fo:margin-top="0.5cm" fo:margin-bottom="0.25cm"/>
+  <style:text-properties fo:font-size="20pt" fo:font-weight="bold" fo:color="#0891b2"/>
+ </style:style>
+ <style:style style:name="TITRE2" style:family="paragraph">
+  <style:paragraph-properties fo:margin-top="0.4cm" fo:margin-bottom="0.2cm"/>
+  <style:text-properties fo:font-size="16pt" fo:font-weight="bold" fo:color="#0891b2"/>
+ </style:style>
+ <style:style style:name="TITRE3" style:family="paragraph">
+  <style:paragraph-properties fo:margin-top="0.3cm" fo:margin-bottom="0.15cm"/>
+  <style:text-properties fo:font-size="13pt" fo:font-weight="bold"/>
+ </style:style>
+ <style:style style:name="CORPS" style:family="paragraph">
+  <style:paragraph-properties fo:margin-bottom="0.18cm" fo:text-align="justify"/>
+  <style:text-properties fo:font-size="11pt"/>
+ </style:style>
+ <style:style style:name="GRAS" style:family="text">
+  <style:text-properties fo:font-weight="bold"/>
+ </style:style>
+ <style:style style:name="ENTETE" style:family="table-cell">
+  <style:text-properties fo:font-weight="bold"/>
+ </style:style>
+ <text:list-style style:name="PUCES">
+  <text:list-level-style-bullet text:level="1" text:bullet-char="•"/>
+ </text:list-style>
+ <text:list-style style:name="NUMEROS">
+  <text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/>
+ </text:list-style>
+</office:automatic-styles>"""
+
+
+def _x(value) -> str:
+    """Échappe pour XML. Un « & » ou un « < » dans le texte casserait le fichier."""
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _odf_zip(mimetype: str, content_xml: str) -> bytes:
+    """Assemble une archive OpenDocument valide.
+
+    Le fichier `mimetype` doit être le PREMIER de l'archive et stocké SANS compression :
+    c'est ainsi que les outils reconnaissent le type sans tout décompresser. Un ODF qui
+    ne respecte pas cet ordre s'ouvre mal, voire pas du tout.
+    """
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"'
+        ' manifest:version="1.2">'
+        f'<manifest:file-entry manifest:full-path="/" manifest:media-type="{mimetype}"/>'
+        '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+        '<manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/>'
+        "</manifest:manifest>"
+    )
+    # Transparence IA (AI Act art. 50) : la mention voyage dans les métadonnées, pas en
+    # travers du texte — le document reste utilisable tel quel.
+    meta_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"'
+        ' xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0"'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/" office:version="1.2"><office:meta>'
+        f"<meta:generator>{_x(AI_META)}</meta:generator>"
+        "<dc:creator>VindIA (IA)</dc:creator>"
+        f"<meta:keyword>{_x(AI_NOTICE)}</meta:keyword>"
+        "</office:meta></office:document-meta>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), mimetype, compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/manifest.xml", manifest)
+        z.writestr("meta.xml", meta_xml)
+        z.writestr("content.xml", content_xml)
+    return buf.getvalue()
+
+
+def _odf_spans(text: str) -> str:
+    """Contenu d'un paragraphe, avec le **gras** rendu en vrai gras."""
+    out = []
+    for segment, gras in _inline_segments(text):
+        if gras:
+            out.append(f'<text:span text:style-name="GRAS">{_x(segment)}</text:span>')
+        else:
+            out.append(_x(segment))
+    return "".join(out)
+
+
+def _odt_liste(items, style: str) -> str:
+    lignes = "".join(
+        f"<text:list-item><text:p text:style-name=\"CORPS\">{_odf_spans(i)}</text:p></text:list-item>"
+        for i in items
+    )
+    return f'<text:list text:style-name="{style}">{lignes}</text:list>'
+
+
+def _odt_tableau(rows) -> str:
+    if not rows:
+        return ""
+    colonnes = max(len(r) for r in rows)
+    out = [
+        '<table:table table:name="Tableau">',
+        f'<table:table-column table:number-columns-repeated="{colonnes}"/>',
+    ]
+    for index, row in enumerate(rows):
+        out.append("<table:table-row>")
+        for cellule in list(row) + [""] * (colonnes - len(row)):
+            style = ' table:style-name="ENTETE"' if index == 0 else ""
+            texte = _x(_strip_inline(str(cellule)))
+            out.append(
+                f'<table:table-cell{style} office:value-type="string">'
+                f'<text:p text:style-name="CORPS">{texte}</text:p></table:table-cell>'
+            )
+        out.append("</table:table-row>")
+    out.append("</table:table>")
+    return "".join(out)
+
+
+def _build_odt(content: str, base_dir=None) -> bytes:
+    """Texte LibreOffice : titres, paragraphes, listes, tableaux et gras."""
+    corps = []
+    puces: list = []
+    numeros: list = []
+
+    def vider():
+        # Les puces consécutives forment UNE liste : une liste par puce donnerait un
+        # document visuellement haché.
+        if puces:
+            corps.append(_odt_liste(puces, "PUCES"))
+            puces.clear()
+        if numeros:
+            corps.append(_odt_liste(numeros, "NUMEROS"))
+            numeros.clear()
+
+    for genre, data in _blocks(content or ""):
+        if genre == "bullet":
+            if numeros:
+                vider()
+            puces.append(data)
+            continue
+        if genre == "num":
+            if puces:
+                vider()
+            numeros.append(data)
+            continue
+        vider()
+        if genre in ("h1", "h2", "h3"):
+            niveau = genre[1]
+            corps.append(
+                f'<text:h text:outline-level="{niveau}" text:style-name="TITRE{niveau}">'
+                f"{_x(_strip_inline(data))}</text:h>"
+            )
+        elif genre == "para":
+            corps.append(f'<text:p text:style-name="CORPS">{_odf_spans(data)}</text:p>')
+        elif genre == "table":
+            corps.append(_odt_tableau(data))
+        elif genre == "image":
+            # L'image elle-même n'est pas embarquée : on garde sa légende plutôt que de
+            # laisser « ![texte](fichier.png) » en clair dans le document.
+            legende = data[0] if isinstance(data, tuple) else ""
+            if legende:
+                corps.append(f'<text:p text:style-name="CORPS">{_x(legende)}</text:p>')
+        elif genre == "blank":
+            corps.append('<text:p text:style-name="CORPS"/>')
+    vider()
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f"<office:document-content {_ODF_NS}>{_ODF_STYLES}"
+        f"<office:body><office:text>{''.join(corps)}</office:text></office:body>"
+        "</office:document-content>"
+    )
+    return _odf_zip("application/vnd.oasis.opendocument.text", xml)
+
+
+def _build_ods(content: str, base_dir=None) -> bytes:
+    """Classeur LibreOffice. Accepte un tableau markdown comme un CSV."""
+    rows = None
+    for genre, data in _blocks(content or ""):
+        if genre == "table":                       # tableau markdown : il fait foi
+            rows = [[_strip_inline(str(c)) for c in r] for r in data]
+            break
+    if rows is None:
+        rows = _sniff_rows(content or "")
+    cellules = []
+    for index, row in enumerate(rows):
+        cellules.append("<table:table-row>")
+        for valeur in row:
+            texte = str(valeur).strip()
+            style = ' table:style-name="ENTETE"' if index == 0 else ""
+            nombre = None
+            if index > 0 and texte:
+                try:
+                    nombre = float(texte.replace(",", ".").replace(" ", ""))
+                except ValueError:
+                    nombre = None
+            if nombre is not None:
+                # Typé en nombre, sinon la colonne ne se trie ni ne se calcule.
+                cellules.append(
+                    f'<table:table-cell{style} office:value-type="float" '
+                    f'office:value="{nombre}"><text:p>{_x(texte)}</text:p></table:table-cell>'
+                )
+            else:
+                cellules.append(
+                    f'<table:table-cell{style} office:value-type="string">'
+                    f"<text:p>{_x(texte)}</text:p></table:table-cell>"
+                )
+        cellules.append("</table:table-row>")
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f"<office:document-content {_ODF_NS}>{_ODF_STYLES}"
+        '<office:body><office:spreadsheet><table:table table:name="Feuille1">'
+        f"{''.join(cellules)}"
+        "</table:table></office:spreadsheet></office:body></office:document-content>"
+    )
+    return _odf_zip("application/vnd.oasis.opendocument.spreadsheet", xml)
+
+
 _BUILDERS = {
     "docx": _build_docx,
     "xlsx": _build_xlsx,
     "pptx": _build_pptx,
     "pdf": _build_pdf,
+    "odt": _build_odt,
+    "ods": _build_ods,
 }
 
 # Formats TEXTE livrés tels quels, en UTF-8. Sans eux, un simple « fais-moi un .md »

@@ -22,8 +22,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-from .projects import ExtractionError, extract_text
-from .sync_store import SyncStore, slug_workspace
+from .officegen import OFFICE_TYPES as _A_CONSTRUIRE
+from .projects import ExtractionError, extract_text, safe_filename
+from .sync_store import CREATIONS, SyncStore, slug_workspace
 from .tools import Tool, ToolSpec
 
 # Extensions livrées en VRAI binaire bureautique (sinon le fichier serait illisible).
@@ -162,22 +163,90 @@ class FolderReadTool(_WorkspaceTool):
         return text
 
 
+class FolderWriteTool(_WorkspaceTool):
+    """Crée un fichier dans « Créations VindIA » — le dossier de l'ordinateur.
+
+    RÉTABLI le 24/08/2026 après avoir été retiré par erreur le matin même. Le retrait
+    partait d'un constat juste (des fichiers restaient sur le serveur) mais d'une
+    conclusion fausse : ce chemin n'était pas un cul-de-sac, c'est LE chemin qui mène
+    à l'ordinateur de la personne. L'application de bureau descend ensuite ces fichiers
+    dans le dossier qu'elle a choisi — sans Syncthing, sans service tiers.
+    """
+
+    def __init__(self, sync, member_id, allowed=None, *, office_builder=None) -> None:
+        super().__init__(sync, member_id, allowed)
+        self._office_builder = office_builder
+        self.spec = ToolSpec(
+            name="folder_write_file",
+            description=(
+                "Crée un document dans le dossier de l'utilisateur, sur SON ordinateur "
+                "(sous-dossier « Créations VindIA »). C'est le chemin à privilégier "
+                "pour livrer un document : rapport, compte-rendu, note, tableau. "
+                "Formats : .docx, .xlsx, .pptx, .pdf, .odt, .ods, .md, .txt, .csv…"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "Nom du fichier, ex. compte-rendu.docx"},
+                    "content": {"type": "string", "description": "Contenu complet du document."},
+                    "folder": {"type": "string", "description": "Dossier de destination (inutile s'il n'y en a qu'un)."},
+                },
+                "required": ["filename", "content"],
+            },
+        )
+
+    async def run(self, args: dict) -> str:
+        filename = safe_filename(args.get("filename") or "")
+        content = args.get("content") or ""
+        if not content.strip():
+            return "Erreur : contenu vide, rien à écrire."
+        slug, err = self._resolve(args.get("folder") or "")
+        if err:
+            return err
+        rel = f"{CREATIONS}/{filename}"
+        ext = Path(filename).suffix.lower().lstrip(".")
+        # Liste LUE d'officegen, jamais recopiée : c'est une liste figée ici qui avait
+        # laissé passer .odt et .ods en markdown brut.
+        if ext in _A_CONSTRUIRE:
+            builder = self._office_builder or _default_office_builder
+            try:
+                # base_dir = le dossier de la personne → ses images sont trouvables.
+                base = str(self._sync.workspace_dir(self._member_id, slug))
+                payload, _ = builder(filename, content, base)
+            except Exception as exc:  # noqa: BLE001
+                return f"Génération du fichier impossible : {str(exc)[:160]}"
+        else:
+            # Transparence IA (AI Act art. 50) : marquage en tête des fichiers texte.
+            from .officegen import AI_NOTICE
+
+            marked = content if content.startswith(AI_NOTICE) else f"{AI_NOTICE}\n\n{content}"
+            payload = marked.encode("utf-8")
+        if not self._sync.put(self._member_id, slug, rel, payload):
+            return "Écriture refusée : nom de fichier invalide."
+        return (
+            f"Fichier « {filename} » créé dans « {CREATIONS} ». Il arrive sur "
+            "l'ordinateur de la personne à la prochaine synchronisation de "
+            "l'application de bureau."
+        )
+
+
+def _default_office_builder(name: str, content: str, base_dir=None):  # pragma: no cover
+    from .officegen import build_file
+
+    return build_file(name, content, base_dir)
+
+
 def build_workspace_tools(
     sync: SyncStore, member_id: str, allowed: Optional[Sequence[str]] = None
 ) -> List[Tool]:
-    """Outils de CONSULTATION liés à CE membre (et, si fourni, à CES dossiers seulement).
+    """Outils de dossier liés à CE membre (et, si fourni, à CES dossiers seulement).
 
-    L'écriture a été retirée le 24/08/2026. Elle déposait le fichier sous
-    `vindia-data/workspaces/…`, que rien ne synchronise : le fichier existait bel et
-    bien sur le serveur, mais n'atteignait jamais l'ordinateur de la personne. VindIA
-    annonçait donc en toute bonne foi un document que son destinataire ne trouvait
-    nulle part — cinq livrables ont été perdus ainsi entre le 16 et le 23/08.
-
-    La livraison passe désormais par un seul chemin, valable pour TOUS les membres :
-    le marqueur [[FICHIER:nom.ext]], que la page convertit en téléchargement. Les
-    dossiers restent consultables (lister, lire) — c'est leur usage réel.
+    L'écriture était le chemin qui mène à l'ordinateur de la personne : VindIA écrit
+    ici, l'application de bureau descend le fichier dans le dossier qu'elle a choisi.
+    Retirée par erreur le 24/08/2026, rétablie le jour même.
     """
     return [
         FolderListTool(sync, member_id, allowed),
         FolderReadTool(sync, member_id, allowed),
+        FolderWriteTool(sync, member_id, allowed),
     ]

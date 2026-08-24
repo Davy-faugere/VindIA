@@ -105,6 +105,16 @@
      La base 200px le fait passer à la ligne plutôt que devenir illisible. */
   .projbar select{flex:1 1 200px; min-width:0; padding:9px 12px; border:1px solid #e5e7eb; border-radius:12px; font:inherit; font-size:13px; background:#fff; outline:none; color:#374151}
   .projbar select:focus{border-color:var(--accent)}
+  /* Le champ « nom du projet » remplace visuellement le select le temps de la saisie :
+     même hauteur, même arrondi, même bordure. Posé sans style, il jurait avec le reste. */
+  .projbar input[type=text]{flex:1 1 200px; min-width:0; padding:9px 12px;
+    border:1px solid var(--accent); border-radius:12px; font:inherit; font-size:13px;
+    background:#fff; outline:none; color:#374151}
+  .projbar input[type=text]::placeholder{color:#9ca3af}
+  .projbar input[type=text][hidden]{display:none}
+  /* Même précaution que pour la barre : une règle de mise en page peut l'emporter
+     sur l'attribut hidden et laisser le sélecteur visible à côté du champ. */
+  .projbar select[hidden]{display:none}
   .projbar button{padding:9px 13px; border:1px solid #e5e7eb; border-radius:12px; background:#fff; color:var(--primary); font:inherit; font-size:13px; font-weight:600; cursor:pointer}
   .projbar button:hover{border-color:var(--accent)}
   .dl{display:inline-block; margin-top:4px; padding:9px 14px; background:var(--primary); color:#fff;
@@ -247,16 +257,17 @@
     <div class="transcript" id="transcript"></div>
 
     <div class="projbar" id="projbar">
+      <!-- Saisie du nom EN PLACE, à la PLACE du sélecteur. L'application de bureau
+           (Electron) ne supporte pas prompt() : le bouton « Nouveau » ne faisait rien.
+           Inséré entre les boutons, le champ poussait la barre sur deux lignes — il
+           remplace donc le sélecteur le temps de la saisie. -->
+      <input id="newProjName" type="text" autocomplete="off" maxlength="60"
+             placeholder="Nom du projet, puis Entrée" hidden />
       <select id="projSelect" title="Projet actif">
         <option value="">Sans projet</option>
       </select>
       <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
-      <!-- Saisie du nom EN PLACE. L'application de bureau (Electron) ne supporte pas
-           prompt() : le bouton « Nouveau » ne faisait donc strictement rien, sans le
-           moindre message. -->
-      <input id="newProjName" type="text" autocomplete="off" maxlength="60"
-             placeholder="Nom du projet, puis Entrée" hidden />
-      <button id="projFoldersBtn" type="button" title="Dossiers rattachés à ce projet">Dossiers</button>
+      <button id="projFoldersBtn" type="button" title="Tes dossiers : en ajouter, en retirer, les rattacher au projet">Dossiers</button>
       <button id="attachBtn" type="button" title="Ajouter des fichiers de référence">Importer</button>
       <input id="fileInput" type="file" hidden multiple
              accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.html,.htm,.docx,.xlsx,.pptx,.pdf" />
@@ -348,7 +359,11 @@
       </div>
       <p class="sheet-sub">Coche les dossiers de ton ordinateur qui concernent ce projet. Quand il est actif, VindIA ne consulte que ceux-là.</p>
       <div id="projFoldersList" class="conn-list"></div>
-      <button id="projFoldersSave" class="conn-btn" type="button" style="margin-top:12px">Enregistrer</button>
+      <!-- Ajouter un dossier de l'ordinateur : n'existait que dans un SECOND panneau,
+           visible seulement dans l'application de bureau. On tombait donc sur une liste
+           vide sans aucun moyen de la remplir. -->
+      <button id="projAddFolderBtn" class="conn-btn" type="button" style="margin-top:12px" hidden>Ajouter un dossier de mon ordinateur</button>
+      <button id="projFoldersSave" class="conn-btn" type="button" style="margin-top:8px">Enregistrer</button>
       <p class="sheet-note" id="projFoldersNote"></p>
     </div>
   </div>
@@ -918,6 +933,7 @@
       projSelect.dispatchEvent(new Event('change'));
       newProjName.value = '';
       newProjName.hidden = true;
+      projSelect.hidden = false;
       errEl.textContent = '';
     } catch (e) { errEl.textContent = e.message; }
   }
@@ -926,12 +942,15 @@
     // Deuxième clic sur « Nouveau » = validation, pour qui n'appuie pas sur Entrée.
     if (!newProjName.hidden && newProjName.value.trim()) { creerProjet(newProjName.value); return; }
     newProjName.hidden = false;
+    projSelect.hidden = true;       // le champ prend sa place, la barre garde sa forme
     newProjName.focus();
   });
 
   newProjName.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); creerProjet(newProjName.value); }
-    if (e.key === 'Escape') { newProjName.value = ''; newProjName.hidden = true; }
+    if (e.key === 'Escape') {
+      newProjName.value = ''; newProjName.hidden = true; projSelect.hidden = false;
+    }
   });
 
   // Extensions ingérables (mêmes que le serveur).
@@ -1225,8 +1244,9 @@
     catch (e) { note.textContent = e.message; return; }
     if (!spaces.length) {
       note.textContent = desktop
-        ? "Aucun dossier synchronisé. Ajoute-en un dans « Mes dossiers »."
-        : "Aucun dossier synchronisé. Ouvre l'application VindIA sur ton ordinateur pour en ajouter.";
+        ? "Aucun dossier pour l'instant. Ajoute-en un avec le bouton ci-dessous."
+        : "Aucun dossier pour l'instant. Ouvre l'application VindIA sur ton ordinateur "
+          + "pour en ajouter un : un site web n'a pas le droit d'accéder à tes fichiers.";
       return;
     }
     const linked = new Set((proj && proj.workspaces) || []);
@@ -1255,6 +1275,21 @@
     await renderProjectFolders();
   });
   $('projFoldersClose').addEventListener('click', () => { $('projFoldersOverlay').hidden = true; });
+  // Ajout d'un dossier depuis CE panneau : plus besoin d'en chercher un second.
+  // Le bouton n'apparaît que dans l'application de bureau — seule capable d'ouvrir
+  // le sélecteur de dossiers du système.
+  if (desktop) {
+    $('projAddFolderBtn').hidden = false;
+    $('projAddFolderBtn').addEventListener('click', async () => {
+      const note = $('projFoldersNote');
+      const dir = await desktop.pickFolder();
+      if (!dir) return;
+      note.textContent = 'Lecture du dossier…';
+      await syncAll(false);
+      await renderProjectFolders();
+      note.textContent = 'Dossier ajouté. Coche-le puis Enregistrer pour le rattacher au projet.';
+    });
+  }
   $('projFoldersOverlay').addEventListener('click', (e) => {
     if (e.target === $('projFoldersOverlay')) $('projFoldersOverlay').hidden = true;
   });
@@ -1297,7 +1332,9 @@
   }
 
   if (desktop) {
-    $('foldersBtn').hidden = false;
+    // « Mes dossiers » reste dans le code (panneau de synchronisation détaillé) mais
+    // n'est plus proposé : le panneau « Dossiers » fait désormais tout, et deux entrées
+    // pour la même chose menaient dans une liste vide sans moyen de la remplir.
     $('foldersBtn').addEventListener('click', async () => {
       $('foldersOverlay').hidden = false; await renderFolders();
       folderNote().textContent = 'Synchronisation…'; await syncAll(false);

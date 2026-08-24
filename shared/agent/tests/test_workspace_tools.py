@@ -88,27 +88,57 @@ class IsolationTest(unittest.TestCase):
             self.assertIn("introuvable", out)
 
 
-class EcritureRetireeTest(unittest.TestCase):
-    """L'écriture dans les dossiers a été retirée le 24/08/2026.
+class EcritureTest(unittest.TestCase):
+    """L'écriture est LE chemin vers l'ordinateur de la personne.
 
-    Elle déposait le fichier sous `vindia-data/workspaces/…`, que rien ne synchronise :
-    le fichier existait sur le serveur mais n'atteignait jamais l'ordinateur. VindIA
-    annonçait donc un document introuvable pour son destinataire — cinq livrables ont
-    été perdus ainsi entre le 16 et le 23/08/2026.
+    Retirée par erreur le 24/08/2026 : le constat de départ était juste (des fichiers
+    restaient sur le serveur) mais la conclusion fausse. Ce n'était pas un cul-de-sac,
+    c'était le chemin que l'application de bureau descend ensuite sur le disque de la
+    personne — sans Syncthing ni service tiers. Rétablie le jour même.
 
-    Ce test verrouille la décision : si quelqu'un remet un outil d'écriture ici sans
-    régler la synchronisation, il rouvre exactement le même piège.
+    Ces tests verrouillent sa présence : la retirer casse la livraison des documents.
     """
 
-    def test_seuls_les_outils_de_consultation_sont_fournis(self):
+    def test_l_outil_d_ecriture_est_bien_fourni(self):
         with tempfile.TemporaryDirectory() as tmp:
             noms = [t.spec.name for t in _tools(tmp)]
-            self.assertEqual(noms, ["folder_list_files", "folder_read_file"])
+            self.assertIn("folder_write_file", noms)
 
-    def test_aucun_outil_d_ecriture_sur_les_dossiers(self):
+    def test_ecrit_dans_le_sous_dossier_des_creations(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for outil in _tools(tmp):
-                self.assertNotIn("write", outil.spec.name)
+            s = SyncStore(tmp)
+            s.register_workspace(ALICE, "Unique", "Unique")
+            out = _run(_tools(tmp)[2], filename="note.md", content="Contenu du compte-rendu")
+            self.assertIn(CREATIONS, out)
+            written = s.get(ALICE, "Unique", f"{CREATIONS}/note.md").decode("utf-8")
+            self.assertIn("Contenu du compte-rendu", written)
+
+    def test_fichier_texte_porte_la_mention_ia(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = SyncStore(tmp)
+            s.register_workspace(ALICE, "Unique", "Unique")
+            _run(_tools(tmp)[2], filename="note.md", content="Texte")
+            from shared.agent.officegen import AI_NOTICE
+
+            written = s.get(ALICE, "Unique", f"{CREATIONS}/note.md").decode("utf-8")
+            self.assertTrue(written.startswith(AI_NOTICE))   # transparence IA (art. 50)
+
+    def test_les_formats_bureautiques_sont_construits(self):
+        # Y COMPRIS .odt et .ods : une liste figée ici les avait laissés passer en
+        # markdown brut sous un nom de fichier bureautique.
+        with tempfile.TemporaryDirectory() as tmp:
+            s = SyncStore(tmp)
+            s.register_workspace(ALICE, "Unique", "Unique")
+            for nom, entete in (("r.docx", b"PK"), ("r.pdf", b"%PDF"), ("r.odt", b"PK")):
+                with self.subTest(nom=nom):
+                    _run(_tools(tmp)[2], filename=nom, content="# Titre\n\nDu texte.")
+                    data = s.get(ALICE, "Unique", f"{CREATIONS}/{nom}")
+                    self.assertTrue(data.startswith(entete), nom)
+
+    def test_contenu_vide_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            SyncStore(tmp).register_workspace(ALICE, "Unique", "Unique")
+            self.assertIn("vide", _run(_tools(tmp)[2], filename="x.md", content="   "))
 
 
 if __name__ == "__main__":

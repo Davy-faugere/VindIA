@@ -25,13 +25,14 @@ class MistralLLMTest(unittest.TestCase):
         out = asyncio.run(llm.reply("bonjour", session_id="s1"))
 
         self.assertEqual(out, "réponse-mock")
-        self.assertEqual(
-            captured["messages"],
-            [
-                {"role": "system", "content": "Tu es VindIA."},
-                {"role": "user", "content": "bonjour"},
-            ],
-        )
+        self.assertEqual(len(captured["messages"]), 2)
+        systeme = captured["messages"][0]
+        self.assertEqual(systeme["role"], "system")
+        self.assertIn("Tu es VindIA.", systeme["content"])
+        # La date du jour est jointe au prompt depuis le 24/08/2026 : sans elle, le
+        # modèle ignore quel jour on est et invente une date plausible.
+        self.assertIn("Nous sommes le", systeme["content"])
+        self.assertEqual(captured["messages"][1], {"role": "user", "content": "bonjour"})
 
     def test_without_system_prompt_sends_only_user_turn(self):
         captured = {}
@@ -54,7 +55,33 @@ class MistralLLMTest(unittest.TestCase):
 
         asyncio.run(MistralLLM(transport=fake).reply("bonjour", session_id="s1"))
         self.assertEqual(captured["messages"][0]["role"], "system")
-        self.assertEqual(captured["messages"][0]["content"], VINDIA_SYSTEM_PROMPT)
+        self.assertIn(VINDIA_SYSTEM_PROMPT, captured["messages"][0]["content"])
+
+    def test_la_date_du_jour_accompagne_le_prompt(self):
+        """Sans elle, le modèle ignore quel jour on est — et l'invente."""
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        asyncio.run(MistralLLM(transport=fake, system_prompt="Tu es VindIA.")
+                    .reply("bonjour", session_id="s1"))
+        contenu = captured["messages"][0]["content"]
+        self.assertIn("Nous sommes le", contenu)
+        self.assertIn("ne calcule JAMAIS une date toi-même", contenu)
+
+    def test_sans_prompt_aucune_date_n_est_ajoutee(self):
+        # Utilisé sans prompt (intégration tierce), l'adaptateur reste silencieux.
+        captured = {}
+
+        async def fake(messages):
+            captured["messages"] = list(messages)
+            return "ok"
+
+        asyncio.run(MistralLLM(transport=fake, system_prompt=None)
+                    .reply("bonjour", session_id="s1"))
+        self.assertEqual(captured["messages"], [{"role": "user", "content": "bonjour"}])
         self.assertEqual(captured["messages"][-1], {"role": "user", "content": "bonjour"})
 
     def test_system_override_replaces_base_prompt(self):

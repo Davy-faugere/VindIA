@@ -37,6 +37,30 @@ SttTransport = Callable[[object, str], Awaitable[str]]
 TtsTransport = Callable[[str, str], Awaitable[bytes]]
 
 DEFAULT_LLM_MODEL = "mistral-large-latest"
+
+_JOURS_FR = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+_MOIS_FR = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+            "septembre", "octobre", "novembre", "décembre")
+
+
+def _date_du_jour(maintenant=None) -> str:
+    """Rappelle au modèle quel jour et quelle heure il est.
+
+    Sans cette ligne, il l'ignore — et quand il l'ignore, il INVENTE une date plausible
+    plutôt que de le dire. Sur un agenda destiné à quelqu'un dont la mémoire flanche,
+    c'est la pire des réponses. Le calcul des dates reste fait en Python ; ceci sert
+    seulement à ce qu'il situe la conversation.
+    """
+    from datetime import datetime
+
+    m = maintenant or datetime.now()
+    return (f"Nous sommes le {_JOURS_FR[m.weekday()]} {m.day} {_MOIS_FR[m.month - 1]} "
+            f"{m.year}, il est {m.hour} h {m.minute:02d}. "
+            "Pour tout ce qui touche à l'agenda, ne calcule JAMAIS une date toi-même : "
+            "passe à l'outil l'expression exacte dite par la personne "
+            "(« demain à 14h », « tous les matins à 8h »), il s'en charge.")
+
+
 DEFAULT_STT_MODEL = "voxtral-mini-latest"
 
 # Prompt injecté par défaut dans toutes les sessions VindIA.
@@ -250,6 +274,9 @@ class MistralLLM:
             p
             for p in (
                 system_override or self._system_prompt,
+                # Seulement s'il y a déjà un prompt : utilisé sans prompt (tests,
+                # intégrations tierces), l'adaptateur doit rester silencieux.
+                _date_du_jour() if (system_override or self._system_prompt) else None,
                 self._memory_context.get(session_id),
                 self._skills_context.get(session_id),
                 self._project_context.get(session_id),

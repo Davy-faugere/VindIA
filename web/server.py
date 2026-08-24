@@ -36,6 +36,7 @@ from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 from shared.agent.project_tools import build_project_tools
 from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
+from shared.agent.agenda_tools import build_agenda_tools
 from shared.agent.verifie_actions import controle as controle_actions
 from shared.agent.approvals import ApprovalStore, APPROVED, PENDING
 from shared.agent.telegram_notify import build_telegram_notifier
@@ -86,6 +87,7 @@ _AUTO_APPROVE = os.environ.get("VINDIA_AUTO_APPROVE", "0").strip().lower() not i
 # Services lazily initialisés (MariaDB optionnel : la mémoire est désactivée si absent)
 _store = None
 _memory = None
+_agenda = None   # Agenda : mémoire factuelle (rendez-vous, traitements)
 _llm = None
 _auth = None      # SupabaseAuth : valide les jetons de login (None si non configuré)
 _projects = None  # ProjectStore : espaces projet PRIVÉS par membre (persistance disque)
@@ -147,7 +149,7 @@ def _check_rate_stt(member_id: str) -> bool:
 
 
 def _init_services() -> None:
-    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync, _skills
+    global _store, _memory, _llm, _projects, _vault, _google, _vps_tools, _auth, _approvals, _telegram, _email, _sync, _skills, _agenda
     if _llm is not None:
         return
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
@@ -221,10 +223,18 @@ def _init_services() -> None:
             )
             return resp.choices[0].message.content
         _memory = MemoryStore(_store, _extract_transport)
+        # Agenda : la mémoire FACTUELLE (rendez-vous, traitements, activités). Elle
+        # partage la connexion MariaDB mais reste une table distincte de la mémoire
+        # conversationnelle — l'une est reformulée par le modèle, l'autre fait foi.
+        from shared.agent.agenda import Agenda
+        _agenda = Agenda(_store._conn, paramstyle="format")
+        _agenda.creer_tables()
+        print("[VindIA] Agenda actif (fil d'Ariane, rappels).")
     except Exception as exc:
         print(f"[VindIA] MariaDB indisponible — mémoire désactivée : {exc}")
         _store = None
         _memory = None
+        _agenda = None
 
 
 async def token(request: web.Request) -> web.Response:
@@ -423,6 +433,10 @@ async def ask(request: web.Request) -> web.Response:
     if _sync is not None:
         allowed = active_proj.workspaces if (active_proj and active_proj.workspaces) else None
         session_tools += build_workspace_tools(_sync, member_id, allowed)
+    # Agenda : le fil d'Ariane. Fourni a TOUT membre — c'est le coeur de l'usage,
+    # pas une option reservee. Les outils sont figes sur ce member_id.
+    if _agenda is not None:
+        session_tools += build_agenda_tools(_agenda, member_id)
     session_tools += _outils_connectes(member_id)
     if ident["admin"] and _vps_tools:
         session_tools += _vps_tools  # état du VPS : ADMIN uniquement

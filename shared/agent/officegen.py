@@ -130,12 +130,74 @@ def _table_row(line: str):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+_CALLOUT = re.compile(r"^\s*>\s*\[!(\w+)\]\s*(.*)$")
+_KPI_OUVRE = re.compile(r"^\s*:::\s*kpi\s*$", re.IGNORECASE)
+_KPI_FERME = re.compile(r"^\s*:::\s*$")
+
+# Encadrés : nom lisible + rôle. Le rôle décide de la couleur au rendu.
+CALLOUTS = {
+    "info": ("Information", "accent"),
+    "note": ("À noter", "accent"),
+    "cle": ("Point clé", "accent"),
+    "important": ("Important", "accent"),
+    "attention": ("Attention", "alerte"),
+    "warning": ("Attention", "alerte"),
+    "danger": ("Danger", "alerte"),
+    "risque": ("Risque", "alerte"),
+    "ok": ("Validé", "succes"),
+    "succes": ("Validé", "succes"),
+    "astuce": ("Astuce", "succes"),
+    "tip": ("Astuce", "succes"),
+}
+
+
 def _blocks(content: str):
-    """Itère les blocs : ('h1'|'h2'|'h3'|'bullet'|'num'|'para'|'table'|'blank', data)."""
+    """Itère les blocs du contenu.
+
+    Genres : 'h1'|'h2'|'h3'|'bullet'|'num'|'para'|'table'|'image'|'blank', plus deux
+    blocs de mise en page ajoutés le 24/08/2026 pour sortir du « titres et puces » :
+
+      'callout' → (rôle, titre, [lignes])   depuis  > [!attention] Titre
+      'kpi'     → [(libellé, valeur, écart)] depuis  ::: kpi … :::
+
+    Les générateurs qui ne savent pas les rendre les traitent en paragraphes : aucun
+    format ne casse, ils sont seulement moins jolis.
+    """
     lines = content.splitlines()
     i = 0
     while i < len(lines):
         line = lines[i].rstrip()
+        # Encadré : « > [!type] Titre » puis les lignes « > » qui suivent.
+        mc = _CALLOUT.match(line)
+        if mc:
+            nom = mc.group(1).lower()
+            libelle, role = CALLOUTS.get(nom, ("Information", "accent"))
+            titre = mc.group(2).strip() or libelle
+            corps = []
+            i += 1
+            while i < len(lines) and lines[i].lstrip().startswith(">"):
+                corps.append(lines[i].lstrip().lstrip(">").strip())
+                i += 1
+            yield ("callout", (role, titre, [c for c in corps if c]))
+            continue
+        # Bandeau de chiffres : « ::: kpi » … « ::: », une ligne par indicateur.
+        if _KPI_OUVRE.match(line):
+            mesures = []
+            i += 1
+            while i < len(lines) and not _KPI_FERME.match(lines[i]):
+                brut = lines[i].strip().strip("|")
+                if brut:
+                    cells = [c.strip() for c in brut.split("|")]
+                    mesures.append((
+                        _strip_inline(cells[0]) if cells else "",
+                        _strip_inline(cells[1]) if len(cells) > 1 else "",
+                        _strip_inline(cells[2]) if len(cells) > 2 else "",
+                    ))
+                i += 1
+            i += 1                                  # ligne de fermeture
+            if mesures:
+                yield ("kpi", mesures)
+            continue
         # Tableau : une ligne avec « | » suivie d'une ligne de séparation.
         if "|" in line and line.strip() and i + 1 < len(lines) and _is_table_sep(lines[i + 1]):
             rows = [_table_row(line)]
@@ -190,6 +252,31 @@ def _build_docx(content: str, base_dir=None) -> bytes:
             _docx_runs(doc.add_paragraph(style="List Number"), data)
         elif kind == "table":
             _docx_table(doc, data)
+        elif kind == "callout":
+            # Encadré : un tableau d'une cellule, seule structure de python-docx qui
+            # accepte une bordure et se rend fidèlement dans Word comme dans LibreOffice.
+            role, titre, lignes = data
+            t = doc.add_table(rows=1, cols=1)
+            t.style = "Table Grid"
+            cell = t.cell(0, 0)
+            r = cell.paragraphs[0].add_run(_strip_inline(titre))
+            r.bold = True
+            r.font.color.rgb = RGBColor(*{"alerte": (185, 28, 28),
+                                          "succes": (4, 120, 87)}.get(role, _ACCENT))
+            for l in lignes:
+                _docx_runs(cell.add_paragraph(), l)
+            doc.add_paragraph()
+        elif kind == "kpi":
+            # Trois lignes : valeurs en gras, écarts, puis libellés.
+            t = doc.add_table(rows=3, cols=len(data))
+            t.style = "Table Grid"
+            for col, (libelle, valeur, ecart) in enumerate(data):
+                rv = t.cell(0, col).paragraphs[0].add_run(valeur)
+                rv.bold = True
+                rv.font.color.rgb = accent
+                t.cell(1, col).paragraphs[0].add_run(ecart or "")
+                t.cell(2, col).paragraphs[0].add_run(libelle)
+            doc.add_paragraph()
         elif kind == "image":
             alt, rel = data
             img = _safe_image(base_dir, rel)
@@ -373,6 +460,15 @@ def _build_pdf(content: str, base_dir=None) -> bytes:
             _pdf_line(pdf, data, prefix="  ")
         elif kind == "table":
             _pdf_table(pdf, data)
+        elif kind == "callout":
+            role, titre, lignes = data
+            _pdf_line(pdf, _strip_inline(titre), prefix="| ")
+            for l in lignes:
+                _pdf_line(pdf, _strip_inline(l), prefix="| ")
+        elif kind == "kpi":
+            _pdf_table(pdf, [[l for l, _, _ in data],
+                             [v for _, v, _ in data],
+                             [e for _, _, e in data]])
         elif kind == "image":
             alt, rel = data
             img = _safe_image(base_dir, rel)
@@ -449,32 +545,81 @@ _ODF_NS = (
 )
 
 # Styles portés par le document lui-même : ne dépendre d'aucun modèle extérieur, sinon
-# les titres retombent en corps de texte selon la version de LibreOffice.
-_ODF_STYLES = """<office:automatic-styles>
+# les titres retombent en corps de texte selon la version de LibreOffice. Générés à
+# partir de la charte, pour que la couleur choisie par la personne s'applique partout.
+
+def _odf_styles(ch) -> str:
+    c, clair, moyen = ch.couleur, ch.fond_clair, ch.fond_moyen
+    return f"""<office:automatic-styles>
+ <style:style style:name="COUVTITRE" style:family="paragraph">
+  <style:paragraph-properties fo:margin-top="7cm" fo:margin-bottom="0.3cm" fo:text-align="center"/>
+  <style:text-properties fo:font-size="{ch.taille_titre_couverture}pt" fo:font-weight="bold" fo:color="{c}"/>
+ </style:style>
+ <style:style style:name="COUVSOUS" style:family="paragraph">
+  <style:paragraph-properties fo:margin-bottom="0.2cm" fo:text-align="center"/>
+  <style:text-properties fo:font-size="14pt" fo:color="{ch.gris_texte}"/>
+ </style:style>
+ <style:style style:name="COUVMETA" style:family="paragraph">
+  <style:paragraph-properties fo:text-align="center"/>
+  <style:text-properties fo:font-size="{ch.taille_legende}pt" fo:color="{ch.gris_texte}"/>
+ </style:style>
  <style:style style:name="TITRE1" style:family="paragraph">
-  <style:paragraph-properties fo:margin-top="0.5cm" fo:margin-bottom="0.25cm"/>
-  <style:text-properties fo:font-size="20pt" fo:font-weight="bold" fo:color="#0891b2"/>
+  <style:paragraph-properties fo:margin-top="0.7cm" fo:margin-bottom="0.25cm"
+     fo:border-bottom="0.06cm solid {c}" fo:padding-bottom="0.12cm"/>
+  <style:text-properties fo:font-size="{ch.taille_h1}pt" fo:font-weight="bold" fo:color="{c}"/>
  </style:style>
  <style:style style:name="TITRE2" style:family="paragraph">
-  <style:paragraph-properties fo:margin-top="0.4cm" fo:margin-bottom="0.2cm"/>
-  <style:text-properties fo:font-size="16pt" fo:font-weight="bold" fo:color="#0891b2"/>
+  <style:paragraph-properties fo:margin-top="0.5cm" fo:margin-bottom="0.2cm"/>
+  <style:text-properties fo:font-size="{ch.taille_h2}pt" fo:font-weight="bold" fo:color="{c}"/>
  </style:style>
  <style:style style:name="TITRE3" style:family="paragraph">
-  <style:paragraph-properties fo:margin-top="0.3cm" fo:margin-bottom="0.15cm"/>
-  <style:text-properties fo:font-size="13pt" fo:font-weight="bold"/>
+  <style:paragraph-properties fo:margin-top="0.35cm" fo:margin-bottom="0.15cm"/>
+  <style:text-properties fo:font-size="{ch.taille_h3}pt" fo:font-weight="bold" fo:color="{ch.gris_texte}"/>
  </style:style>
  <style:style style:name="CORPS" style:family="paragraph">
-  <style:paragraph-properties fo:margin-bottom="0.18cm" fo:text-align="justify"/>
-  <style:text-properties fo:font-size="11pt"/>
+  <style:paragraph-properties fo:margin-bottom="0.2cm" fo:line-height="140%" fo:text-align="justify"/>
+  <style:text-properties fo:font-size="{ch.taille_corps}pt"/>
+ </style:style>
+ <style:style style:name="ENCTITRE" style:family="paragraph">
+  <style:paragraph-properties fo:margin-bottom="0.1cm"/>
+  <style:text-properties fo:font-size="{ch.taille_corps}pt" fo:font-weight="bold" fo:color="{c}"/>
+ </style:style>
+ <style:style style:name="KPIVAL" style:family="paragraph">
+  <style:paragraph-properties fo:text-align="center" fo:margin-bottom="0.05cm"/>
+  <style:text-properties fo:font-size="20pt" fo:font-weight="bold" fo:color="{c}"/>
+ </style:style>
+ <style:style style:name="KPILIB" style:family="paragraph">
+  <style:paragraph-properties fo:text-align="center"/>
+  <style:text-properties fo:font-size="{ch.taille_legende}pt" fo:color="{ch.gris_texte}"/>
+ </style:style>
+ <style:style style:name="KPIECART" style:family="paragraph">
+  <style:paragraph-properties fo:text-align="center" fo:margin-bottom="0.1cm"/>
+  <style:text-properties fo:font-size="10pt" fo:font-weight="bold" fo:color="{ch.gris_texte}"/>
  </style:style>
  <style:style style:name="GRAS" style:family="text">
   <style:text-properties fo:font-weight="bold"/>
  </style:style>
  <style:style style:name="ENTETE" style:family="table-cell">
-  <style:text-properties fo:font-weight="bold"/>
+  <style:table-cell-properties fo:background-color="{moyen}" fo:padding="0.15cm"
+     fo:border="0.02cm solid {c}"/>
+ </style:style>
+ <style:style style:name="CELL" style:family="table-cell">
+  <style:table-cell-properties fo:padding="0.12cm" fo:border="0.02cm solid {ch.gris_filet}"/>
+ </style:style>
+ <style:style style:name="ENCADRE" style:family="table-cell">
+  <style:table-cell-properties fo:background-color="{clair}" fo:padding="0.3cm"
+     fo:border-left="0.12cm solid {c}"/>
+ </style:style>
+ <style:style style:name="ENCALERTE" style:family="table-cell">
+  <style:table-cell-properties fo:background-color="#fef2f2" fo:padding="0.3cm"
+     fo:border-left="0.12cm solid #b91c1c"/>
+ </style:style>
+ <style:style style:name="ENCSUCCES" style:family="table-cell">
+  <style:table-cell-properties fo:background-color="#f0fdf4" fo:padding="0.3cm"
+     fo:border-left="0.12cm solid #047857"/>
  </style:style>
  <text:list-style style:name="PUCES">
-  <text:list-level-style-bullet text:level="1" text:bullet-char="•"/>
+  <text:list-level-style-bullet text:level="1" text:bullet-char="\u2022"/>
  </text:list-style>
  <text:list-style style:name="NUMEROS">
   <text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/>
@@ -565,9 +710,71 @@ def _odt_tableau(rows) -> str:
     return "".join(out)
 
 
-def _build_odt(content: str, base_dir=None) -> bytes:
-    """Texte LibreOffice : titres, paragraphes, listes, tableaux et gras."""
-    corps = []
+def _odt_encadre(role: str, titre: str, lignes, ch) -> str:
+    """Encadré : un tableau d'une cellule, avec filet de couleur à gauche.
+
+    ODF n'offre pas de « boîte » simple ; la cellule de tableau est la seule structure
+    qui accepte un fond ET une bordure partielle, et que LibreOffice rend fidèlement.
+    """
+    style = {"alerte": "ENCALERTE", "succes": "ENCSUCCES"}.get(role, "ENCADRE")
+    corps = "".join(
+        f'<text:p text:style-name="CORPS">{_odf_spans(l)}</text:p>' for l in lignes
+    )
+    return (
+        '<table:table table:name="Encadre"><table:table-column/>'
+        f'<table:table-row><table:table-cell table:style-name="{style}" '
+        'office:value-type="string">'
+        f'<text:p text:style-name="ENCTITRE">{_x(_strip_inline(titre))}</text:p>'
+        f'{corps}</table:table-cell></table:table-row></table:table>'
+        '<text:p text:style-name="CORPS"/>'
+    )
+
+
+def _odt_kpi(mesures, ch) -> str:
+    """Bandeau de chiffres : une colonne par indicateur, valeur en grand."""
+    n = len(mesures)
+    cells = []
+    for libelle, valeur, ecart in mesures:
+        ligne_ecart = (
+            f'<text:p text:style-name="KPIECART">{_x(ecart)}</text:p>' if ecart else ""
+        )
+        cells.append(
+            '<table:table-cell table:style-name="CELL" office:value-type="string">'
+            f'<text:p text:style-name="KPIVAL">{_x(valeur)}</text:p>'
+            f'{ligne_ecart}'
+            f'<text:p text:style-name="KPILIB">{_x(libelle)}</text:p>'
+            "</table:table-cell>"
+        )
+    return (
+        f'<table:table table:name="Indicateurs">'
+        f'<table:table-column table:number-columns-repeated="{n}"/>'
+        f'<table:table-row>{"".join(cells)}</table:table-row></table:table>'
+        '<text:p text:style-name="CORPS"/>'
+    )
+
+
+def _odt_couverture(ch) -> str:
+    """Page de garde. Rien n'est produit si le document n'a pas de titre."""
+    if not ch.a_couverture:
+        return ""
+    out = [f'<text:p text:style-name="COUVTITRE">{_x(ch.titre)}</text:p>']
+    if ch.sous_titre:
+        out.append(f'<text:p text:style-name="COUVSOUS">{_x(ch.sous_titre)}</text:p>')
+    meta = " · ".join(x for x in (ch.auteur, ch.date) if x)
+    if meta:
+        out.append(f'<text:p text:style-name="COUVMETA">{_x(meta)}</text:p>')
+    # Saut de page : la couverture reste seule sur sa page.
+    out.append('<text:p text:style-name="CORPS"><text:soft-page-break/></text:p>')
+    return "".join(out)
+
+
+def _build_odt(content: str, base_dir=None, charte=None) -> bytes:
+    """Texte LibreOffice : couverture, titres, paragraphes, listes, tableaux,
+    encadrés et bandeaux de chiffres."""
+    from .charte import Charte
+
+    ch = charte or Charte()
+    corps = [_odt_couverture(ch)]
     puces: list = []
     numeros: list = []
 
@@ -603,6 +810,11 @@ def _build_odt(content: str, base_dir=None) -> bytes:
             corps.append(f'<text:p text:style-name="CORPS">{_odf_spans(data)}</text:p>')
         elif genre == "table":
             corps.append(_odt_tableau(data))
+        elif genre == "callout":
+            role, titre, lignes = data
+            corps.append(_odt_encadre(role, titre, lignes, ch))
+        elif genre == "kpi":
+            corps.append(_odt_kpi(data, ch))
         elif genre == "image":
             # L'image elle-même n'est pas embarquée : on garde sa légende plutôt que de
             # laisser « ![texte](fichier.png) » en clair dans le document.
@@ -614,14 +826,14 @@ def _build_odt(content: str, base_dir=None) -> bytes:
     vider()
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f"<office:document-content {_ODF_NS}>{_ODF_STYLES}"
+        f"<office:document-content {_ODF_NS}>{_odf_styles(ch)}"
         f"<office:body><office:text>{''.join(corps)}</office:text></office:body>"
         "</office:document-content>"
     )
     return _odf_zip("application/vnd.oasis.opendocument.text", xml)
 
 
-def _build_ods(content: str, base_dir=None) -> bytes:
+def _build_ods(content: str, base_dir=None, charte=None) -> bytes:
     """Classeur LibreOffice. Accepte un tableau markdown comme un CSV."""
     rows = None
     for genre, data in _blocks(content or ""):
@@ -662,7 +874,7 @@ def _build_ods(content: str, base_dir=None) -> bytes:
         cellules.append("</table:table-row>")
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f"<office:document-content {_ODF_NS}>{_ODF_STYLES}"
+        f"<office:document-content {_ODF_NS}>{_odf_styles(charte or __import__('shared.agent.charte', fromlist=['Charte']).Charte())}"
         '<office:body><office:spreadsheet><table:table table:name="Feuille1">'
         f"{''.join(cellules)}"
         "</table:table></office:spreadsheet></office:body></office:document-content>"
@@ -717,9 +929,21 @@ def build_file(name: str, content: str, base_dir=None) -> tuple[bytes, str]:
     """Construit le fichier. `base_dir` permet d'insérer des images locales
     (« ![alt](nom) ») trouvées sous ce dossier. Lève ValueError si l'extension n'est
     pas gérée."""
+    from .charte import lire_entete
+
     ext = (name.rsplit(".", 1)[-1] if "." in name else "").lower()
+    # L'en-tête « --- » porte titre, sous-titre, auteur et couleur. Il est retiré du
+    # corps : sans ça il s'imprimerait tel quel au début du document.
+    ch, corps = lire_entete(content or "")
     if ext in _BUILDERS:
-        return _BUILDERS[ext](content or "", base_dir), OFFICE_TYPES[ext]
+        constructeur = _BUILDERS[ext]
+        try:
+            return constructeur(corps, base_dir, ch), OFFICE_TYPES[ext]
+        except TypeError:
+            # Constructeurs pas encore adaptés à la charte : ils reçoivent le corps
+            # nettoyé, ce qui vaut toujours mieux que l'en-tête imprimé en clair.
+            return constructeur(corps, base_dir), OFFICE_TYPES[ext]
     if ext in TEXT_TYPES:
+        # Un fichier texte garde son en-tête : il fait partie du contenu attendu.
         return (content or "").encode("utf-8"), TEXT_TYPES[ext]
     raise ValueError(f"format non supporte: {ext}")

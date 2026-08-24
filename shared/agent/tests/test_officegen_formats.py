@@ -164,3 +164,63 @@ class OpenDocumentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MiseEnPageTest(unittest.TestCase):
+    """Couverture, couleur choisie, encadrés et bandeaux de chiffres.
+
+    Constaté en réel (24/08/2026) : « aucune mise en page, tout est en bloc, c'est
+    moche, ça ne me donne même pas envie d'utiliser VindIA pour faire des documents ».
+    Les documents se résumaient à des titres et des puces.
+    """
+
+    ENTETE = ("---\ntitre: Rapport\nsous-titre: Trimestre 3\n"
+              "auteur: EI Faugère Davy\ncouleur: violet\n---\n")
+
+    def _xml(self, contenu):
+        payload, _ = build_file("d.odt", contenu)
+        return zipfile.ZipFile(io.BytesIO(payload)).read("content.xml").decode("utf-8")
+
+    def _corps(self, contenu):
+        """Uniquement le corps : les styles sont toujours DEFINIS, seul leur usage
+        dans le document prouve qu'une couverture a ete produite."""
+        xml = self._xml(contenu)
+        return xml[xml.index("<office:body>"):]
+
+    def test_l_entete_produit_une_couverture_et_ne_s_imprime_pas(self):
+        xml = self._corps(self.ENTETE + "# Partie\n\nTexte.")
+        self.assertIn("COUVTITRE", xml)
+        self.assertIn("Rapport", xml)
+        self.assertIn("Trimestre 3", xml)
+        self.assertNotIn("titre: Rapport", xml)   # l'en-tête ne doit pas être imprimé
+
+    def test_la_couleur_demandee_est_appliquee(self):
+        self.assertIn("#7c3aed", self._xml(self.ENTETE + "# Partie"))
+
+    def test_un_nom_de_couleur_inconnu_ne_casse_rien(self):
+        xml = self._xml("---\ntitre: T\ncouleur: mauve-fluo\n---\n# Partie")
+        ET.fromstring(xml.encode("utf-8"))
+        self.assertIn("#0891b2", xml)             # retombe sur la couleur par défaut
+
+    def test_encadre_rendu_comme_un_bloc(self):
+        xml = self._xml("> [!attention] Marge en recul\n> À surveiller.")
+        self.assertIn("ENCALERTE", xml)
+        self.assertIn("Marge en recul", xml)
+        self.assertNotIn("[!attention]", xml)
+
+    def test_bandeau_de_chiffres(self):
+        xml = self._xml("::: kpi\nClients | 34 | +5\nMarge | 38 % | -2 pts\n:::")
+        self.assertIn("KPIVAL", xml)
+        self.assertIn("34", xml)
+        self.assertIn("-2 pts", xml)
+        self.assertNotIn("::: kpi", xml)
+
+    def test_sans_entete_le_rendu_reste_valable(self):
+        # Les documents déjà produits ne doivent pas changer de comportement.
+        xml = self._corps("# Titre\n\nTexte.")
+        self.assertNotIn("COUVTITRE", xml)
+        self.assertIn("<text:h", xml)
+
+    def test_entete_jamais_referme_laisse_le_contenu_intact(self):
+        ET.fromstring(self._xml("---\ntitre: Oups\n# Partie\n\nTexte.").encode("utf-8"))
+        self.assertNotIn("COUVTITRE", self._corps("---\ntitre: Oups\n# Partie\n\nTexte."))

@@ -251,6 +251,11 @@
         <option value="">Sans projet</option>
       </select>
       <button id="newProjBtn" type="button" title="Créer un projet">Nouveau</button>
+      <!-- Saisie du nom EN PLACE. L'application de bureau (Electron) ne supporte pas
+           prompt() : le bouton « Nouveau » ne faisait donc strictement rien, sans le
+           moindre message. -->
+      <input id="newProjName" type="text" autocomplete="off" maxlength="60"
+             placeholder="Nom du projet, puis Entrée" hidden />
       <button id="projFoldersBtn" type="button" title="Dossiers rattachés à ce projet">Dossiers</button>
       <button id="attachBtn" type="button" title="Ajouter des fichiers de référence">Importer</button>
       <input id="fileInput" type="file" hidden multiple
@@ -900,14 +905,33 @@
     if (d && d.active) addLine('ai', 'Projet « ' + d.active + ' » activé. Je m\'appuie sur ses documents.');
   });
 
-  newProjBtn.addEventListener('click', async () => {
-    const name = (prompt('Nom du projet :') || '').trim();
+  // Création d'un projet : saisie EN PLACE, jamais prompt(). Electron ne le supporte
+  // pas, et le bouton restait donc sans effet dans l'application de bureau.
+  const newProjName = $('newProjName');
+
+  async function creerProjet(name) {
+    name = (name || '').trim();
     if (!name) return;
     try {
       const d = await projApi('/projects/create', { name });
       await loadProjects(d.project && d.project.project_id);
       projSelect.dispatchEvent(new Event('change'));
+      newProjName.value = '';
+      newProjName.hidden = true;
+      errEl.textContent = '';
     } catch (e) { errEl.textContent = e.message; }
+  }
+
+  newProjBtn.addEventListener('click', () => {
+    // Deuxième clic sur « Nouveau » = validation, pour qui n'appuie pas sur Entrée.
+    if (!newProjName.hidden && newProjName.value.trim()) { creerProjet(newProjName.value); return; }
+    newProjName.hidden = false;
+    newProjName.focus();
+  });
+
+  newProjName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); creerProjet(newProjName.value); }
+    if (e.key === 'Escape') { newProjName.value = ''; newProjName.hidden = true; }
   });
 
   // Extensions ingérables (mêmes que le serveur).

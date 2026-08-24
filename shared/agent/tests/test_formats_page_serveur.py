@@ -64,3 +64,31 @@ class FormatsPageServeurTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(PAGE.is_file(), "web/index.html introuvable")
+class DialoguesNavigateurTest(unittest.TestCase):
+    """prompt() ne fonctionne pas dans l'application de bureau.
+
+    Bug réellement survenu (24/08/2026) : le bouton « Nouveau » (créer un projet)
+    appelait prompt(). Electron ne l'implémente pas — le clic ne produisait donc
+    STRICTEMENT RIEN, sans message ni erreur visible. Impossible de créer un projet
+    depuis l'application de bureau.
+
+    alert() et confirm() restent acceptés : Electron les gère.
+    """
+
+    def test_aucun_appel_a_prompt(self):
+        source = PAGE.read_text(encoding="utf-8")
+        # On retire d'abord les commentaires — HTML et JavaScript, y compris ceux qui
+        # tiennent sur plusieurs lignes — sinon la phrase qui explique le piège le
+        # declenche elle-meme.
+        code = re.sub(r"<!--.*?-->", "", source, flags=re.S)
+        code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
+        code = re.sub(r"//[^\n]*", "", code)
+        trouve = re.findall(r"(?<![\w.])prompt\s*\(", code)
+        self.assertEqual(
+            trouve, [],
+            "la page appelle prompt(), inerte dans l'application de bureau : "
+            "utiliser une saisie en place",
+        )

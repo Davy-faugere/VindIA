@@ -715,17 +715,35 @@
     .trim();
 
   // Ajoute le bouton de telechargement pour un blob deja pret
-  function addDownloadButton(name, blob) {
+  function addDownloadButton(name, blob, note) {
     const url = URL.createObjectURL(blob);
     tr.classList.add('show');
     const p = document.createElement('p');
     const a = document.createElement('a');
     a.href = url; a.download = name; a.className = 'dl'; a.textContent = 'Telecharger ' + name;
-    p.appendChild(a); tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
+    p.appendChild(a);
+    if (note) {
+      const s = document.createElement('small');
+      s.textContent = ' ' + note; s.style.opacity = '.75';
+      p.appendChild(s);
+    }
+    tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
   }
 
-  // Formats bureautiques construits cote serveur (vrais binaires Word/Excel/PowerPoint/PDF)
-  const OFFICE = ['docx', 'xlsx', 'pptx', 'pdf'];
+  // Formats TEXTE : leur contenu EST deja le fichier, le navigateur les livre seul.
+  // Tout le reste part au serveur pour y etre CONSTRUIT. La liste est volontairement
+  // celle des formats texte, pas celle des formats bureautiques : une liste fermee de
+  // binaires s'etait desynchronisee du serveur, et un .odt demande repartait en
+  // markdown brut sous un nom de fichier bureautique. Ainsi, un format ajoute cote
+  // serveur fonctionne ici sans qu'on ait a y toucher.
+  const TEXTE = {
+    txt: 'text/plain', log: 'text/plain', md: 'text/markdown', markdown: 'text/markdown',
+    csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json',
+    html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
+    xml: 'application/xml', yml: 'application/yaml', yaml: 'application/yaml',
+    py: 'text/x-python', sql: 'application/sql',
+    sh: 'text/x-shellscript', bash: 'text/x-shellscript'
+  };
 
   function telecharger(nom, blob) {
     const a = document.createElement('a');
@@ -737,7 +755,7 @@
   // Texte -> blob cote client. Bureautique -> /build cote serveur (rien stocke).
   async function offerDownload(name, content) {
     const ext = (name.split('.').pop() || 'txt').toLowerCase();
-    if (OFFICE.includes(ext)) {
+    if (!TEXTE[ext]) {
       try {
         const r = await fetch('/build', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -747,16 +765,16 @@
         addDownloadButton(name, await r.blob());
         return;
       } catch (e) {
-        // Repli : on livre le contenu brut en .txt pour ne rien perdre
+        // Repli : on ne perd pas le contenu, mais on RENOMME en .txt et on le dit.
+        // Livrer du markdown brut sous un nom .odt ou .docx donne un fichier que la
+        // suite bureautique ouvre de travers, sans que personne comprenne pourquoi.
         const fb = name.replace(/\.[^.]+$/, '') + '.txt';
-        addDownloadButton(fb, new Blob([content], { type: 'text/plain;charset=utf-8' }));
+        addDownloadButton(fb, new Blob([content], { type: 'text/plain;charset=utf-8' }),
+                          'Le format ' + ext + ' n\'a pas pu etre construit — contenu livre en texte.');
         return;
       }
     }
-    const mimes = { md:'text/markdown', csv:'text/csv', json:'application/json',
-      html:'text/html', htm:'text/html', css:'text/css', js:'text/javascript',
-      sh:'text/x-shellscript', bash:'text/x-shellscript', txt:'text/plain', yml:'text/yaml', yaml:'text/yaml' };
-    const blob = new Blob([content], { type: (mimes[ext] || 'text/plain') + ';charset=utf-8' });
+    const blob = new Blob([content], { type: TEXTE[ext] + ';charset=utf-8' });
     addDownloadButton(name, blob);
   }
 
@@ -1426,7 +1444,7 @@
             // Excel refusent d'ouvrir. On passe donc par le générateur, comme pour
             // les documents créés dans la conversation.
             const ext = (doc.filename.split('.').pop() || '').toLowerCase();
-            if (OFFICE.includes(ext)) {
+            if (!TEXTE[ext]) {
               const b = await fetch('/build', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: doc.filename, content: r.content || '' })

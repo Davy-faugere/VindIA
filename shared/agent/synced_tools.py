@@ -109,13 +109,16 @@ class SyncedReadTool(Tool):
 
 
 # Extensions converties en VRAI binaire bureautique (sinon écrites en texte).
-_OFFICE_EXT = {"docx", "xlsx", "pptx", "pdf"}
+# Formats a CONSTRUIRE : on lit la liste d'officegen au lieu de la recopier. Une liste
+# figee ici avait laisse passer .odt et .ods, ecrits en markdown brut sous un nom de
+# fichier bureautique — le document arrivait illisible chez l'utilisateur.
+from .officegen import OFFICE_TYPES as _A_CONSTRUIRE
 
 
 class SyncedWriteTool(Tool):
     """Crée un fichier dans « Créations VindIA » (redescend automatiquement sur le PC).
 
-    Pour un format bureautique (.docx/.xlsx/.pptx/.pdf), le contenu est converti en
+    Pour un format bureautique (.docx/.xlsx/.pptx/.pdf/.odt/.ods), le contenu est converti en
     VRAI binaire (même générateur que le téléchargement) → le fichier est lisible sur
     le PC. Pour le reste (.md/.txt…), le texte est écrit tel quel. `office_builder`
     injectable pour les tests.
@@ -150,7 +153,7 @@ class SyncedWriteTool(Tool):
         dest = self._base / _CREATIONS
         dest.mkdir(parents=True, exist_ok=True)
         ext = Path(filename).suffix.lower().lstrip(".")
-        if ext in _OFFICE_EXT:
+        if ext in _A_CONSTRUIRE:
             # Vrai binaire bureautique (sinon le fichier serait illisible sur le PC).
             # base_dir = le dossier synchronisé → VindIA peut insérer des images locales.
             builder = self._office_builder or _default_office_builder

@@ -1,6 +1,7 @@
 """Tests de l'accès au dossier synchronisé — offline, tmpdir."""
 
 import asyncio
+import pathlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,3 +113,39 @@ class SyncedToolsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FormatsConstruitsTest(unittest.TestCase):
+    """L'outil du dossier synchronisé doit CONSTRUIRE les formats bureautiques.
+
+    Bug réellement survenu (24/08/2026) : il portait sa PROPRE liste de formats,
+    {"docx","xlsx","pptx","pdf"}. Un .odt ou un .ods n'y figurant pas, il écrivait le
+    markdown BRUT — « # Titre » et « **gras** » en clair — sous un nom de fichier
+    bureautique. Le document arrivait illisible chez l'utilisateur.
+
+    Troisième liste de formats du projet après celle du serveur et celle de la page.
+    L'outil lit désormais celle d'officegen, seule source.
+    """
+
+    def test_odt_et_ods_sont_reellement_construits(self):
+        import io
+        import zipfile
+
+        from shared.agent.synced_tools import SyncedWriteTool, _CREATIONS
+        for nom in ("note.odt", "table.ods"):
+            with self.subTest(nom=nom):
+                with tempfile.TemporaryDirectory() as tmp:
+                    asyncio.run(SyncedWriteTool(tmp).run(
+                        {"filename": nom, "content": "# Titre\n\nUn **paragraphe**."}))
+                    data = (pathlib.Path(tmp) / _CREATIONS / nom).read_bytes()
+                    # Une archive ODF, pas du texte : le markdown ne doit pas survivre.
+                    z = zipfile.ZipFile(io.BytesIO(data))
+                    self.assertEqual(z.infolist()[0].filename, "mimetype")
+                    xml = z.read("content.xml").decode("utf-8")
+                    self.assertNotIn("# Titre", xml)
+                    self.assertNotIn("**", xml)
+
+    def test_la_liste_des_formats_n_est_pas_recopiee(self):
+        # Le coeur du bug : une liste figee se desynchronise en silence.
+        source = pathlib.Path(__file__).resolve().parents[1] / "synced_tools.py"
+        self.assertNotIn('_OFFICE_EXT = {', source.read_text(encoding="utf-8"))

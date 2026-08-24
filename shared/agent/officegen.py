@@ -634,7 +634,13 @@ def _build_ods(content: str, base_dir=None) -> bytes:
     for index, row in enumerate(rows):
         cellules.append("<table:table-row>")
         for valeur in row:
-            texte = str(valeur).strip()
+            # Un classeur n'affiche pas le markdown : sans ce nettoyage, une demande de
+            # .ods sur du texte narratif produisait des cellules contenant « # Titre »
+            # et « **gras** » en clair.
+            texte = _strip_inline(str(valeur).strip())
+            texte = re.sub(r"^#{1,6}\s+", "", texte)      # titres
+            texte = re.sub(r"^[-*]\s+", "", texte)        # puces
+            texte = texte.strip()
             style = ' table:style-name="ENTETE"' if index == 0 else ""
             nombre = None
             if index > 0 and texte:

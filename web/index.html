@@ -258,7 +258,12 @@
     </div>
 
     <div class="typebar">
-      <input id="textInput" type="text" placeholder="…ou écris ton message" />
+      <!-- La page porte aussi un formulaire de connexion : sans ces attributs, le
+           navigateur prend ce champ pour une adresse e-mail et la pre-remplit ici.
+           name non standard + autocomplete off + data-form-type : les trois sont
+           necessaires, Chrome ignorant « off » seul sur un champ texte anonyme. -->
+      <input id="textInput" type="text" name="vindia-message" autocomplete="off"
+             data-form-type="other" placeholder="…ou écris ton message" />
       <button id="sendBtn">Envoyer</button>
     </div>
 

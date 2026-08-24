@@ -258,7 +258,17 @@
     </div>
 
     <div class="typebar">
-      <input id="textInput" type="text" placeholder="…ou écris ton message" />
+      <!-- La page porte aussi un formulaire de connexion : sans ces attributs, le
+           navigateur prend ce champ pour une adresse e-mail et la pre-remplit ici.
+           name non standard + autocomplete off + data-form-type : les trois sont
+           necessaires, Chrome ignorant « off » seul sur un champ texte anonyme. -->
+      <!-- « readonly » au chargement, retiré au premier clic : c'est le seul moyen fiable
+           d'empêcher le navigateur d'y proposer l'adresse e-mail memorisee pour le
+           formulaire de connexion. autocomplete="off" seul ne suffit pas, Chrome
+           l'ignore sur un champ texte quand la page contient un couple
+           identifiant/mot de passe. -->
+      <input id="textInput" type="text" name="vindia-message" autocomplete="off"
+             data-form-type="other" readonly placeholder="…ou écris ton message" />
       <button id="sendBtn">Envoyer</button>
     </div>
 
@@ -426,6 +436,12 @@
       <input id="newPass" type="password" placeholder="Nouveau mot de passe" autocomplete="new-password" required />
       <div class="pw"><span id="newPwBar"></span></div>
       <p class="pw-hint">12 caractères minimum, avec au moins une majuscule, un chiffre et un caractère spécial.</p>
+      <!-- Double authentification : le lien reçu par e-mail ouvre une session de premier
+           niveau, insuffisante pour changer un mot de passe. Sans ce champ, toute personne
+           ayant active la double authentification restait bloquee sur « AAL2 session is
+           required ». Affiche seulement quand le compte en a besoin. -->
+      <input id="resetOtp" type="text" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" placeholder="Code à 6 chiffres de ton application" hidden />
       <button id="newPassBtn" type="submit">Enregistrer le mot de passe</button>
       <p class="login-err" id="resetErr"></p>
     </form>
@@ -460,6 +476,18 @@
     pendingScreen.hidden = true;
     const rs = document.getElementById('resetScreen'); if (rs) rs.hidden = true;
     loginScreen.hidden = false;
+    // Adresse de la dernière connexion réussie : on la repose dans le champ et le
+    // curseur va directement au mot de passe. L'application de bureau n'a pas le
+    // gestionnaire du navigateur — sans ça, il faut retaper l'adresse à chaque fois.
+    try {
+      const memo = localStorage.getItem('vindia_email');
+      const champ = document.getElementById('loginEmail');
+      if (memo && champ && !champ.value) {
+        champ.value = memo;
+        const mdp = document.getElementById('loginPass');
+        if (mdp) setTimeout(() => mdp.focus(), 60);
+      }
+    } catch (e) { /* mode privé : on affiche simplement un champ vide */ }
   }
   function hideLogin() { loginScreen.hidden = true; }
   function showPending() { loginScreen.hidden = true; pendingScreen.hidden = false; }
@@ -587,10 +615,36 @@
     if (!pwValid(p)) { err.style.color = ''; err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial."; return; }
     err.textContent = ''; b.disabled = true; b.textContent = '…';
     try {
+      // Double authentification : le lien reçu par e-mail n'ouvre qu'une session de
+      // premier niveau. Supabase refuse d'y changer un mot de passe (« AAL2 session is
+      // required »). On franchit donc le second facteur AVANT, quand le compte en a un.
+      const otp = $('resetOtp').value.trim();
+      if (otp) {
+        const { data: fx } = await sb.auth.mfa.listFactors();
+        const facteur = (fx && fx.totp && fx.totp[0]) || null;
+        if (!facteur) { err.textContent = "Aucune application d'authentification sur ce compte."; return; }
+        const { data: ch, error: chErr } = await sb.auth.mfa.challenge({ factorId: facteur.id });
+        if (chErr) { err.textContent = "Échec : " + (chErr.message || ''); return; }
+        const { error: vErr } = await sb.auth.mfa.verify({
+          factorId: facteur.id, challengeId: ch.id, code: otp,
+        });
+        if (vErr) { err.textContent = "Code incorrect ou expiré. Reprends-en un dans ton application."; return; }
+      }
       const { error } = await sb.auth.updateUser({ password: p });
-      if (error) { err.textContent = "Échec : " + (error.message || ''); }
+      if (error) {
+        // Le compte a la double authentification et le code n'a pas encore été saisi :
+        // on demande le code au lieu d'afficher un message technique en anglais.
+        if (/aal2|mfa/i.test(error.message || '') && !otp) {
+          $('resetOtp').hidden = false;
+          $('resetOtp').focus();
+          err.style.color = '';
+          err.textContent = "Ton compte est protégé par une application d'authentification. Saisis le code à 6 chiffres, puis valide de nouveau.";
+        } else {
+          err.textContent = "Échec : " + (error.message || '');
+        }
+      }
       else {
-        $('resetScreen').hidden = true; $('newPass').value = '';
+        $('resetScreen').hidden = true; $('newPass').value = ''; $('resetOtp').value = '';
         history.replaceState(null, '', location.pathname);
         await resolveIdentity();
       }
@@ -651,7 +705,14 @@
           err.textContent = frError(error.message);
           if ((error.message || '').toLowerCase().includes('not confirmed')) $('resendBtn').hidden = false;
         }
-        else { $('loginPass').value = ''; await resolveIdentity(); }
+        else {
+          // On retient l'adresse (jamais le mot de passe) pour ne pas la retaper à
+          // chaque fois. Indispensable dans l'application de bureau, qui n'a pas le
+          // gestionnaire de mots de passe du navigateur.
+          try { localStorage.setItem('vindia_email', email); } catch (e) { /* mode privé */ }
+          $('loginPass').value = '';
+          await resolveIdentity();
+        }
       }
     } catch (e) { err.textContent = 'Opération impossible, réessaie.'; }
     finally { btn.disabled = false; btn.textContent = _signupMode ? 'Créer mon compte' : 'Se connecter'; }
@@ -715,17 +776,35 @@
     .trim();
 
   // Ajoute le bouton de telechargement pour un blob deja pret
-  function addDownloadButton(name, blob) {
+  function addDownloadButton(name, blob, note) {
     const url = URL.createObjectURL(blob);
     tr.classList.add('show');
     const p = document.createElement('p');
     const a = document.createElement('a');
     a.href = url; a.download = name; a.className = 'dl'; a.textContent = 'Telecharger ' + name;
-    p.appendChild(a); tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
+    p.appendChild(a);
+    if (note) {
+      const s = document.createElement('small');
+      s.textContent = ' ' + note; s.style.opacity = '.75';
+      p.appendChild(s);
+    }
+    tr.appendChild(p); tr.scrollTop = tr.scrollHeight;
   }
 
-  // Formats bureautiques construits cote serveur (vrais binaires Word/Excel/PowerPoint/PDF)
-  const OFFICE = ['docx', 'xlsx', 'pptx', 'pdf'];
+  // Formats TEXTE : leur contenu EST deja le fichier, le navigateur les livre seul.
+  // Tout le reste part au serveur pour y etre CONSTRUIT. La liste est volontairement
+  // celle des formats texte, pas celle des formats bureautiques : une liste fermee de
+  // binaires s'etait desynchronisee du serveur, et un .odt demande repartait en
+  // markdown brut sous un nom de fichier bureautique. Ainsi, un format ajoute cote
+  // serveur fonctionne ici sans qu'on ait a y toucher.
+  const TEXTE = {
+    txt: 'text/plain', log: 'text/plain', md: 'text/markdown', markdown: 'text/markdown',
+    csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json',
+    html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
+    xml: 'application/xml', yml: 'application/yaml', yaml: 'application/yaml',
+    py: 'text/x-python', sql: 'application/sql',
+    sh: 'text/x-shellscript', bash: 'text/x-shellscript'
+  };
 
   function telecharger(nom, blob) {
     const a = document.createElement('a');
@@ -737,7 +816,7 @@
   // Texte -> blob cote client. Bureautique -> /build cote serveur (rien stocke).
   async function offerDownload(name, content) {
     const ext = (name.split('.').pop() || 'txt').toLowerCase();
-    if (OFFICE.includes(ext)) {
+    if (!TEXTE[ext]) {
       try {
         const r = await fetch('/build', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -747,16 +826,16 @@
         addDownloadButton(name, await r.blob());
         return;
       } catch (e) {
-        // Repli : on livre le contenu brut en .txt pour ne rien perdre
+        // Repli : on ne perd pas le contenu, mais on RENOMME en .txt et on le dit.
+        // Livrer du markdown brut sous un nom .odt ou .docx donne un fichier que la
+        // suite bureautique ouvre de travers, sans que personne comprenne pourquoi.
         const fb = name.replace(/\.[^.]+$/, '') + '.txt';
-        addDownloadButton(fb, new Blob([content], { type: 'text/plain;charset=utf-8' }));
+        addDownloadButton(fb, new Blob([content], { type: 'text/plain;charset=utf-8' }),
+                          'Le format ' + ext + ' n\'a pas pu etre construit — contenu livre en texte.');
         return;
       }
     }
-    const mimes = { md:'text/markdown', csv:'text/csv', json:'application/json',
-      html:'text/html', htm:'text/html', css:'text/css', js:'text/javascript',
-      sh:'text/x-shellscript', bash:'text/x-shellscript', txt:'text/plain', yml:'text/yaml', yaml:'text/yaml' };
-    const blob = new Blob([content], { type: (mimes[ext] || 'text/plain') + ';charset=utf-8' });
+    const blob = new Blob([content], { type: TEXTE[ext] + ';charset=utf-8' });
     addDownloadButton(name, blob);
   }
 
@@ -1426,7 +1505,7 @@
             // Excel refusent d'ouvrir. On passe donc par le générateur, comme pour
             // les documents créés dans la conversation.
             const ext = (doc.filename.split('.').pop() || '').toLowerCase();
-            if (OFFICE.includes(ext)) {
+            if (!TEXTE[ext]) {
               const b = await fetch('/build', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: doc.filename, content: r.content || '' })
@@ -1495,7 +1574,11 @@
               boutons.forEach(b => { b.disabled = false; });
               return;
             }
+            // L'accès a pu être ouvert sans que l'adresse ait pu être vérifiée : le
+            // taire laisserait croire que la vérification a eu lieu.
+            const note = r && r.avertissement ? r.avertissement : '';
             await renderAdmin();
+            if (note) adminNote.textContent = note;
           }
           catch (e) { adminNote.textContent = e.message; boutons.forEach(b => { b.disabled = false; }); }
         };
@@ -2028,6 +2111,10 @@
   }
   sendBtn.addEventListener('click', sendText);
   textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
+  // Le champ naît « readonly » pour que le navigateur n'y propose pas l'adresse
+  // e-mail ; on le rend inscriptible dès que la personne veut vraiment y écrire.
+  ['focus', 'pointerdown'].forEach((ev) =>
+    textInput.addEventListener(ev, () => textInput.removeAttribute('readonly')));
   // Dès qu'il corrige, on n'interrompt plus : la question vocale attendrait sinon
   // au milieu de sa frappe.
 })();

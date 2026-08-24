@@ -31,12 +31,14 @@ class SupabaseAuth:
         anon_key: str,
         admin_emails,
         *,
+        service_key: str = "",
         http: Optional[HttpGet] = None,
         cache_ttl: float = 300.0,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._url = (url or "").rstrip("/")
         self._anon = anon_key or ""
+        self._service = service_key or ""
         self._admins = {e.strip().lower() for e in (admin_emails or []) if e and e.strip()}
         self._http = http
         self._ttl = cache_ttl
@@ -81,6 +83,33 @@ class SupabaseAuth:
         }
         self._cache[token] = (identity, now + self._ttl)
         return identity
+
+    async def email_confirme(self, member_id: str) -> Optional[bool]:
+        """L'adresse est-elle confirmée CHEZ SUPABASE ? None si on ne peut pas savoir.
+
+        Le drapeau local `adresse_confirmee` ne se pose qu'au premier passage de la
+        personne DANS l'application. Quelqu'un qui clique le lien reçu par e-mail sans
+        revenir ensuite reste donc marqué « jamais confirmé », et l'administrateur ne
+        peut plus lui ouvrir l'accès — le compte est coincé. Supabase est la seule
+        source qui fasse foi sur ce point : on la lit ici plutôt que de deviner.
+
+        Demande une clé de service (`SUPABASE_SERVICE_KEY`) : l'API admin n'est pas
+        accessible avec la clé publique. Sans elle, on retourne None (on ne sait pas)
+        plutôt que False (on affirmerait à tort que l'adresse n'est pas confirmée).
+        """
+        if not (self._url and self._service and member_id):
+            return None
+        http = self._http or self._live_http()
+        try:
+            status, data = await http(
+                f"{self._url}/auth/v1/admin/users/{member_id}",
+                {"Authorization": f"Bearer {self._service}", "apikey": self._service},
+            )
+        except Exception:
+            return None
+        if status != 200 or not isinstance(data, dict):
+            return None
+        return bool(data.get("email_confirmed_at"))
 
     def _live_http(self) -> HttpGet:  # pragma: no cover - live
         async def _get(url: str, headers: dict) -> Tuple[int, dict]:

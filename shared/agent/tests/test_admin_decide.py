@@ -14,7 +14,29 @@ import os
 import tempfile
 import unittest
 
-from aiohttp.test_utils import TestClient, TestServer
+# La CI « stdlib, 0 dépendance » n'installe rien : ce test monte l'application réelle,
+# il a donc besoin d'aiohttp. Il s'exécute avant chaque livraison via
+# ./scripts/verifier.sh (venv complet) et se saute proprement en intégration continue.
+# On vérifie l'application ENTIÈRE, pas seulement aiohttp : web.server tire aussi
+# livekit et edge-tts, absents d'un environnement sans dépendances.
+# Les variables sont posées AVANT l'import : web.server en lit à la charge, et leur
+# absence ferait sauter ces tests jusque dans le venv complet — ils ne protégeraient
+# alors plus rien.
+for _cle, _valeur in (
+    ("SUPABASE_URL", "https://exemple.supabase.co"),
+    ("SUPABASE_ANON_KEY", "anon"),
+    ("LIVEKIT_URL", "wss://exemple.livekit.cloud"),
+    ("LIVEKIT_API_KEY", "cle-test"),
+    ("LIVEKIT_API_SECRET", "secret-test"),
+):
+    os.environ.setdefault(_cle, _valeur)
+
+try:
+    from aiohttp.test_utils import TestClient, TestServer
+    import web.server  # noqa: F401
+    _APP_DISPONIBLE = True
+except Exception:  # pragma: no cover - dépend de l'environnement
+    _APP_DISPONIBLE = False
 
 ADMIN = "00000000-0000-0000-0000-0000000000ad"
 CIBLE = "00000000-0000-0000-0000-00000000c1b1"
@@ -64,6 +86,7 @@ def _decide(app):
     return asyncio.run(run())
 
 
+@unittest.skipUnless(_APP_DISPONIBLE, "dépendances runtime absentes — job CI sans dépendance")
 class AdminDecideTest(unittest.TestCase):
     def test_ouvre_l_acces_quand_supabase_confirme_l_adresse(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -262,8 +262,13 @@
            navigateur prend ce champ pour une adresse e-mail et la pre-remplit ici.
            name non standard + autocomplete off + data-form-type : les trois sont
            necessaires, Chrome ignorant « off » seul sur un champ texte anonyme. -->
+      <!-- « readonly » au chargement, retiré au premier clic : c'est le seul moyen fiable
+           d'empêcher le navigateur d'y proposer l'adresse e-mail memorisee pour le
+           formulaire de connexion. autocomplete="off" seul ne suffit pas, Chrome
+           l'ignore sur un champ texte quand la page contient un couple
+           identifiant/mot de passe. -->
       <input id="textInput" type="text" name="vindia-message" autocomplete="off"
-             data-form-type="other" placeholder="…ou écris ton message" />
+             data-form-type="other" readonly placeholder="…ou écris ton message" />
       <button id="sendBtn">Envoyer</button>
     </div>
 
@@ -471,6 +476,18 @@
     pendingScreen.hidden = true;
     const rs = document.getElementById('resetScreen'); if (rs) rs.hidden = true;
     loginScreen.hidden = false;
+    // Adresse de la dernière connexion réussie : on la repose dans le champ et le
+    // curseur va directement au mot de passe. L'application de bureau n'a pas le
+    // gestionnaire du navigateur — sans ça, il faut retaper l'adresse à chaque fois.
+    try {
+      const memo = localStorage.getItem('vindia_email');
+      const champ = document.getElementById('loginEmail');
+      if (memo && champ && !champ.value) {
+        champ.value = memo;
+        const mdp = document.getElementById('loginPass');
+        if (mdp) setTimeout(() => mdp.focus(), 60);
+      }
+    } catch (e) { /* mode privé : on affiche simplement un champ vide */ }
   }
   function hideLogin() { loginScreen.hidden = true; }
   function showPending() { loginScreen.hidden = true; pendingScreen.hidden = false; }
@@ -688,7 +705,14 @@
           err.textContent = frError(error.message);
           if ((error.message || '').toLowerCase().includes('not confirmed')) $('resendBtn').hidden = false;
         }
-        else { $('loginPass').value = ''; await resolveIdentity(); }
+        else {
+          // On retient l'adresse (jamais le mot de passe) pour ne pas la retaper à
+          // chaque fois. Indispensable dans l'application de bureau, qui n'a pas le
+          // gestionnaire de mots de passe du navigateur.
+          try { localStorage.setItem('vindia_email', email); } catch (e) { /* mode privé */ }
+          $('loginPass').value = '';
+          await resolveIdentity();
+        }
       }
     } catch (e) { err.textContent = 'Opération impossible, réessaie.'; }
     finally { btn.disabled = false; btn.textContent = _signupMode ? 'Créer mon compte' : 'Se connecter'; }
@@ -2087,6 +2111,10 @@
   }
   sendBtn.addEventListener('click', sendText);
   textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
+  // Le champ naît « readonly » pour que le navigateur n'y propose pas l'adresse
+  // e-mail ; on le rend inscriptible dès que la personne veut vraiment y écrire.
+  ['focus', 'pointerdown'].forEach((ev) =>
+    textInput.addEventListener(ev, () => textInput.removeAttribute('readonly')));
   // Dès qu'il corrige, on n'interrompt plus : la question vocale attendrait sinon
   // au milieu de sa frappe.
 })();

@@ -434,12 +434,47 @@ _BUILDERS = {
     "pdf": _build_pdf,
 }
 
+# Formats TEXTE livrés tels quels, en UTF-8. Sans eux, un simple « fais-moi un .md »
+# finissait en erreur 400 « format non supporté » alors que la consigne système demande
+# explicitement des .html et des .md. Un fichier texte n'a rien à construire : seul son
+# type MIME change, pour que le navigateur le traite correctement.
+TEXT_TYPES = {
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "csv": "text/csv",
+    "html": "text/html",
+    "htm": "text/html",
+    "json": "application/json",
+    "xml": "application/xml",
+    "yml": "application/yaml",
+    "yaml": "application/yaml",
+    "py": "text/x-python",
+    "js": "text/javascript",
+    "css": "text/css",
+    "sql": "application/sql",
+    "sh": "application/x-shellscript",
+    "ics": "text/calendar",
+    "srt": "application/x-subrip",
+    "vcf": "text/vcard",
+    "log": "text/plain",
+    "ini": "text/plain",
+    "conf": "text/plain",
+}
+
+
+def formats_supportes() -> list:
+    """Extensions productibles, binaires et texte. Sert aussi à répondre à la question
+    « quels formats sais-tu produire ? » sans que qui que ce soit ait à deviner."""
+    return sorted(set(_BUILDERS) | set(TEXT_TYPES))
+
 
 def build_file(name: str, content: str, base_dir=None) -> tuple[bytes, str]:
-    """Construit le fichier binaire. `base_dir` permet d'insérer des images locales
+    """Construit le fichier. `base_dir` permet d'insérer des images locales
     (« ![alt](nom) ») trouvées sous ce dossier. Lève ValueError si l'extension n'est
     pas gérée."""
     ext = (name.rsplit(".", 1)[-1] if "." in name else "").lower()
-    if ext not in _BUILDERS:
-        raise ValueError(f"format non supporte: {ext}")
-    return _BUILDERS[ext](content or "", base_dir), OFFICE_TYPES[ext]
+    if ext in _BUILDERS:
+        return _BUILDERS[ext](content or "", base_dir), OFFICE_TYPES[ext]
+    if ext in TEXT_TYPES:
+        return (content or "").encode("utf-8"), TEXT_TYPES[ext]
+    raise ValueError(f"format non supporte: {ext}")

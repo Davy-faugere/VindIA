@@ -88,47 +88,27 @@ class IsolationTest(unittest.TestCase):
             self.assertIn("introuvable", out)
 
 
-class WriteTest(unittest.TestCase):
-    def test_writes_into_creations_subfolder(self):
+class EcritureRetireeTest(unittest.TestCase):
+    """L'écriture dans les dossiers a été retirée le 24/08/2026.
+
+    Elle déposait le fichier sous `vindia-data/workspaces/…`, que rien ne synchronise :
+    le fichier existait sur le serveur mais n'atteignait jamais l'ordinateur. VindIA
+    annonçait donc un document introuvable pour son destinataire — cinq livrables ont
+    été perdus ainsi entre le 16 et le 23/08/2026.
+
+    Ce test verrouille la décision : si quelqu'un remet un outil d'écriture ici sans
+    régler la synchronisation, il rouvre exactement le même piège.
+    """
+
+    def test_seuls_les_outils_de_consultation_sont_fournis(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s = SyncStore(tmp)
-            s.register_workspace(ALICE, "Unique", "Unique")
-            out = _run(_tools(tmp)[2], filename="note.md", content="Contenu du compte-rendu")
-            self.assertIn(CREATIONS, out)
-            written = s.get(ALICE, "Unique", f"{CREATIONS}/note.md").decode("utf-8")
-            self.assertIn("Contenu du compte-rendu", written)
+            noms = [t.spec.name for t in _tools(tmp)]
+            self.assertEqual(noms, ["folder_list_files", "folder_read_file"])
 
-    def test_text_file_carries_ai_notice(self):
+    def test_aucun_outil_d_ecriture_sur_les_dossiers(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s = SyncStore(tmp)
-            s.register_workspace(ALICE, "Unique", "Unique")
-            _run(_tools(tmp)[2], filename="note.md", content="Texte")
-            from shared.agent.officegen import AI_NOTICE
-
-            written = s.get(ALICE, "Unique", f"{CREATIONS}/note.md").decode("utf-8")
-            self.assertTrue(written.startswith(AI_NOTICE))   # transparence IA (art. 50)
-
-    def test_office_extension_uses_binary_builder(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            s = SyncStore(tmp)
-            s.register_workspace(ALICE, "Unique", "Unique")
-            seen = {}
-
-            def fake_builder(name, content, base_dir=None):
-                seen.update(name=name, base_dir=base_dir)
-                return b"BINAIRE", "application/x-test"
-
-            from shared.agent.workspace_tools import FolderWriteTool
-
-            tool = FolderWriteTool(SyncStore(tmp), ALICE, office_builder=fake_builder)
-            _run(tool, filename="rapport.docx", content="Titre")
-            self.assertEqual(seen["name"], "rapport.docx")
-            self.assertEqual(s.get(ALICE, "Unique", f"{CREATIONS}/rapport.docx"), b"BINAIRE")
-
-    def test_empty_content_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            SyncStore(tmp).register_workspace(ALICE, "Unique", "Unique")
-            self.assertIn("vide", _run(_tools(tmp)[2], filename="x.md", content="   "))
+            for outil in _tools(tmp):
+                self.assertNotIn("write", outil.spec.name)
 
 
 if __name__ == "__main__":

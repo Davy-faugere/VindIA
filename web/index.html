@@ -431,6 +431,12 @@
       <input id="newPass" type="password" placeholder="Nouveau mot de passe" autocomplete="new-password" required />
       <div class="pw"><span id="newPwBar"></span></div>
       <p class="pw-hint">12 caractères minimum, avec au moins une majuscule, un chiffre et un caractère spécial.</p>
+      <!-- Double authentification : le lien reçu par e-mail ouvre une session de premier
+           niveau, insuffisante pour changer un mot de passe. Sans ce champ, toute personne
+           ayant active la double authentification restait bloquee sur « AAL2 session is
+           required ». Affiche seulement quand le compte en a besoin. -->
+      <input id="resetOtp" type="text" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" placeholder="Code à 6 chiffres de ton application" hidden />
       <button id="newPassBtn" type="submit">Enregistrer le mot de passe</button>
       <p class="login-err" id="resetErr"></p>
     </form>
@@ -592,10 +598,36 @@
     if (!pwValid(p)) { err.style.color = ''; err.textContent = "Mot de passe trop faible : 12 caractères minimum, avec majuscule, chiffre et caractère spécial."; return; }
     err.textContent = ''; b.disabled = true; b.textContent = '…';
     try {
+      // Double authentification : le lien reçu par e-mail n'ouvre qu'une session de
+      // premier niveau. Supabase refuse d'y changer un mot de passe (« AAL2 session is
+      // required »). On franchit donc le second facteur AVANT, quand le compte en a un.
+      const otp = $('resetOtp').value.trim();
+      if (otp) {
+        const { data: fx } = await sb.auth.mfa.listFactors();
+        const facteur = (fx && fx.totp && fx.totp[0]) || null;
+        if (!facteur) { err.textContent = "Aucune application d'authentification sur ce compte."; return; }
+        const { data: ch, error: chErr } = await sb.auth.mfa.challenge({ factorId: facteur.id });
+        if (chErr) { err.textContent = "Échec : " + (chErr.message || ''); return; }
+        const { error: vErr } = await sb.auth.mfa.verify({
+          factorId: facteur.id, challengeId: ch.id, code: otp,
+        });
+        if (vErr) { err.textContent = "Code incorrect ou expiré. Reprends-en un dans ton application."; return; }
+      }
       const { error } = await sb.auth.updateUser({ password: p });
-      if (error) { err.textContent = "Échec : " + (error.message || ''); }
+      if (error) {
+        // Le compte a la double authentification et le code n'a pas encore été saisi :
+        // on demande le code au lieu d'afficher un message technique en anglais.
+        if (/aal2|mfa/i.test(error.message || '') && !otp) {
+          $('resetOtp').hidden = false;
+          $('resetOtp').focus();
+          err.style.color = '';
+          err.textContent = "Ton compte est protégé par une application d'authentification. Saisis le code à 6 chiffres, puis valide de nouveau.";
+        } else {
+          err.textContent = "Échec : " + (error.message || '');
+        }
+      }
       else {
-        $('resetScreen').hidden = true; $('newPass').value = '';
+        $('resetScreen').hidden = true; $('newPass').value = ''; $('resetOtp').value = '';
         history.replaceState(null, '', location.pathname);
         await resolveIdentity();
       }

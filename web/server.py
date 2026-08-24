@@ -36,6 +36,7 @@ from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 from shared.agent.project_tools import build_project_tools
 from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
+from shared.agent.verifie_actions import controle as controle_actions
 from shared.agent.approvals import ApprovalStore, APPROVED, PENDING
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, decision_message, signup_message
@@ -434,12 +435,16 @@ async def ask(request: web.Request) -> web.Response:
     # Avec outils (web et/ou projet), un énoncé peut enchaîner plusieurs appels :
     # on laisse plus de marge qu'une réponse LLM directe.
     timeout = 60.0 if (getattr(_llm, "_tools", None) or extra_tools) else 30.0
+    # Trace des outils réellement appelés : sert à vérifier que la réponse n'affirme
+    # pas une action qui n'a pas eu lieu.
+    outils_appeles: list = []
     try:
         reply = await asyncio.wait_for(
             _llm.reply(
                 message, session_id=session_key, extra_tools=extra_tools,
                 system_override=system_override,
                 transports=_transports_du_membre(member_id),
+                journal_outils=outils_appeles,
             ),
             timeout=timeout,
         )
@@ -447,6 +452,15 @@ async def ask(request: web.Request) -> web.Response:
         return web.json_response({"error": "délai dépassé, réessaie"}, status=504)
     except Exception as exc:
         return web.json_response({"error": str(exc)[:300]}, status=502)
+    # Garde-fou anti-mensonge : une affirmation de livraison n'est autorisee que si un
+    # outil d'ecriture a tourne, ou si la reponse porte le marqueur [[FICHIER:]]. Sans
+    # preuve, la phrase est RETIREE. La consigne systeme ne suffit pas : « j'ai cree le
+    # fichier » est la suite la plus plausible apres une demande de document, donc le
+    # modele la produit meme quand c'est faux.
+    reply, corrige = controle_actions(reply, outils_appeles)
+    if corrige:
+        print(f"[VindIA] affirmation non prouvee retiree (outils: {outils_appeles or 'aucun'})",
+              flush=True)
     return web.json_response({"reply": reply})
 
 

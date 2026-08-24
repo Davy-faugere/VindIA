@@ -215,6 +215,7 @@ class MistralLLM:
         extra_tools: Optional[object] = None,
         system_override: Optional[str] = None,
         transports: Optional[tuple] = None,
+        journal_outils: Optional[list] = None,
     ) -> str:
         history = self._history.get(session_id, deque(maxlen=self._max_history * 2))
         messages: list[dict] = []
@@ -249,7 +250,8 @@ class MistralLLM:
         # mémoire, les projets et les compétences restent rangés par session).
         texte_tr, outils_tr = transports if transports else (None, None)
         if active_tools:
-            response = await self._reply_with_tools(messages, active_tools, outils_tr)
+            response = await self._reply_with_tools(messages, active_tools, outils_tr,
+                                                    journal=journal_outils)
         else:
             transport = texte_tr or self._transport or self._live_transport()
             response = await transport(messages)
@@ -263,7 +265,8 @@ class MistralLLM:
         return response
 
     async def _reply_with_tools(self, base: Sequence[dict], tools: object,
-                                transport_override: Optional[object] = None) -> str:
+                                transport_override: Optional[object] = None,
+                                journal: Optional[list] = None) -> str:
         """Boucle function-calling : LLM ↔ outils jusqu'à une réponse en clair.
 
         `tools` = le registre actif pour cet énoncé (globaux + session). Contrat du
@@ -282,6 +285,10 @@ class MistralLLM:
                 return out.get("content") or ""
             work.append(out["assistant"])  # assistant + ses tool_calls
             for call in calls:
+                # Trace des outils REELLEMENT appeles : elle sert a verifier, apres
+                # coup, que la reponse n'affirme pas une action qui n'a pas eu lieu.
+                if journal is not None:
+                    journal.append(call["name"])
                 result = await tools.dispatch(call["name"], call.get("arguments"))
                 work.append(
                     {

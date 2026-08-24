@@ -475,7 +475,47 @@ async def ask(request: web.Request) -> web.Response:
     if corrige:
         print(f"[VindIA] affirmation non prouvee retiree (outils: {outils_appeles or 'aucun'})",
               flush=True)
+    # Le fichier produit rejoint AUSSI le dossier synchronisé quand la personne en a
+    # un. Sans cela, tout reposait sur le choix d'outil du modèle : il émettait le
+    # marqueur de téléchargement, la personne cherchait dans ses dossiers, et ne
+    # trouvait rien. Une consigne ne suffit pas — le modèle en dévie.
+    if ident["admin"] and "synced_write_file" not in outils_appeles:
+        depose = await _deposer_dans_le_dossier(reply)
+        if depose:
+            reply = f"{reply}\n\nJe l'ai aussi déposé dans ton dossier : {depose}."
     return web.json_response({"reply": reply})
+
+
+async def _deposer_dans_le_dossier(texte: str) -> str:
+    """Écrit dans le dossier synchronisé le fichier annoncé par [[FICHIER:…]].
+
+    Retourne le nom déposé, ou "" si rien n'a été écrit.
+
+    Pourquoi côté serveur plutôt qu'en consigne : le modèle choisissait le marqueur de
+    téléchargement alors que la personne allait chercher le fichier dans ses dossiers,
+    et ne trouvait rien. Une consigne ne suffit pas — il en dévie. Ici, dès qu'un
+    fichier est produit et qu'un dossier synchronisé existe, il y est écrit, quel que
+    soit le chemin choisi par le modèle.
+
+    Best-effort : un échec ne doit jamais faire perdre la réponse ni le téléchargement.
+    """
+    m = re.search(r"\[\[FICHIER:([^\]]+)\]\](.*?)\[\[/FICHIER\]\]", texte or "", re.S)
+    if not m:
+        return ""
+    nom, contenu = m.group(1).strip(), m.group(2)
+    if not nom or not contenu.strip():
+        return ""
+    try:
+        from shared.agent.synced_tools import SyncedWriteTool
+
+        outil = SyncedWriteTool(os.path.join(_DATA_DIR, "synced"))
+        retour = await outil.run({"filename": nom, "content": contenu})
+        if str(retour).lower().startswith("erreur"):
+            return ""
+        return nom
+    except Exception as exc:  # noqa: BLE001
+        print(f"[VindIA] dépôt dans le dossier impossible : {exc}", flush=True)
+        return ""
 
 
 async def session_end(request: web.Request) -> web.Response:

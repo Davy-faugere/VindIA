@@ -10,6 +10,7 @@ qu'elle répond bien.
 """
 
 import asyncio
+import importlib
 import os
 import tempfile
 import unittest
@@ -114,6 +115,51 @@ class AdminDecideTest(unittest.TestCase):
             self.assertEqual(status, 409, body)
             self.assertTrue(body.get("adresse_non_confirmee"))
 
+
+
+@unittest.skipUnless(_APP_DISPONIBLE, "dépendances runtime absentes — job CI sans dépendance")
+class DepotDansLeDossierTest(unittest.TestCase):
+    """Un document produit doit atterrir dans le dossier de la personne.
+
+    Constaté en réel (24/08/2026) : « je viens de demander un document en PDF, je ne
+    le vois pas dans mes fichiers ». Le modèle avait choisi le marqueur de
+    téléchargement ; la personne, elle, allait le chercher dans ses dossiers.
+
+    La consigne système ne suffit pas — le modèle en dévie. Le dépôt est donc fait
+    côté serveur, quel que soit le chemin qu'il a choisi.
+    """
+
+    def _deposer(self, texte):
+        import tempfile
+
+        import web.server as s
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["VINDIA_DATA_DIR"] = tmp
+            os.makedirs(os.path.join(tmp, "synced"), exist_ok=True)
+            importlib.reload(s)
+            nom = asyncio.run(s._deposer_dans_le_dossier(texte))
+            chemin = os.path.join(tmp, "synced", "Créations VindIA", nom) if nom else ""
+            existe = bool(chemin) and os.path.isfile(chemin)
+            debut = open(chemin, "rb").read(5) if existe else b""
+            return nom, existe, debut
+
+    def test_le_fichier_est_reellement_ecrit(self):
+        nom, existe, _ = self._deposer(
+            "Voici. [[FICHIER:note.md]]# Titre\n\nDu texte.[[/FICHIER]]")
+        self.assertEqual(nom, "note.md")
+        self.assertTrue(existe)
+
+    def test_un_pdf_est_construit_pas_recopie(self):
+        _, existe, debut = self._deposer(
+            "[[FICHIER:rapport.pdf]]# Titre\n\nDu texte.[[/FICHIER]]")
+        self.assertTrue(existe)
+        self.assertTrue(debut.startswith(b"%PDF"))
+
+    def test_sans_marqueur_rien_n_est_ecrit(self):
+        self.assertEqual(self._deposer("juste une réponse parlée")[0], "")
+
+    def test_marqueur_vide_ignore(self):
+        self.assertEqual(self._deposer("[[FICHIER:vide.md]]   [[/FICHIER]]")[0], "")
 
 if __name__ == "__main__":
     unittest.main()

@@ -327,7 +327,7 @@ async def auth(request: web.Request) -> web.Response:
     if not ident.get("approved"):
         return web.json_response({
             "ok": True, "approved": False, "status": ident.get("status"),
-            "display_name": ident.get("prenom") or (ident.get("email") or "").split("@")[0] or "toi",
+            "display_name": ident.get("prenom") or "",
             "admin": False,
         })
     has_memory = False
@@ -336,11 +336,14 @@ async def auth(request: web.Request) -> web.Response:
         if ctx:
             _llm.load_memory(member_id, ctx)
             has_memory = True
-    display = (ident.get("email") or "").split("@")[0] or "toi"
+    # Le prénom est saisi à l'inscription : c'est lui qui doit servir. À défaut —
+    # comptes créés avant que le formulaire le demande — on n'affiche RIEN plutôt que
+    # de fabriquer un pseudo à partir de l'adresse : « Bonjour faugredavy » n'appelle
+    # personne par son nom, et la page sait très bien se passer du prénom.
     return web.json_response({
         "ok": True,
         "approved": True,
-        "display_name": display,
+        "display_name": ident.get("prenom") or "",
         "admin": ident["admin"],
         "has_memory": has_memory,
     })

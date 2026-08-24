@@ -1495,7 +1495,11 @@
               boutons.forEach(b => { b.disabled = false; });
               return;
             }
+            // L'accès a pu être ouvert sans que l'adresse ait pu être vérifiée : le
+            // taire laisserait croire que la vérification a eu lieu.
+            const note = r && r.avertissement ? r.avertissement : '';
             await renderAdmin();
+            if (note) adminNote.textContent = note;
           }
           catch (e) { adminNote.textContent = e.message; boutons.forEach(b => { b.disabled = false; }); }
         };

@@ -88,3 +88,42 @@ class VerifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmailConfirmeTest(unittest.TestCase):
+    """Le drapeau local ne suffit pas : Supabase est la seule source qui fasse foi.
+
+    Bug réellement survenu (24/08/2026) : deux comptes avaient confirmé leur adresse
+    chez Supabase mais restaient marqués « jamais confirmé » côté VindIA, parce que le
+    drapeau ne se pose qu'au premier passage DANS l'application. L'administrateur ne
+    pouvait plus leur ouvrir l'accès : la validation répondait 409.
+    """
+
+    def test_lit_email_confirmed_at_chez_supabase(self):
+        async def http(url, headers):
+            self.assertTrue(url.endswith("/auth/v1/admin/users/uuid-123"))
+            self.assertEqual(headers["Authorization"], "Bearer service-key")
+            return 200, {"id": "uuid-123", "email_confirmed_at": "2026-08-24T08:31:46Z"}
+
+        auth = SupabaseAuth(URL, ANON, ADMINS, service_key="service-key", http=http)
+        self.assertIs(asyncio.run(auth.email_confirme("uuid-123")), True)
+
+    def test_adresse_non_confirmee_renvoie_false(self):
+        async def http(url, headers):
+            return 200, {"id": "uuid-123", "email_confirmed_at": None}
+
+        auth = SupabaseAuth(URL, ANON, ADMINS, service_key="service-key", http=http)
+        self.assertIs(asyncio.run(auth.email_confirme("uuid-123")), False)
+
+    def test_sans_cle_de_service_on_ne_sait_pas(self):
+        # None, pas False : affirmer « non confirmé » sans pouvoir vérifier ferait
+        # refuser des comptes légitimes.
+        auth = SupabaseAuth(URL, ANON, ADMINS)
+        self.assertIsNone(asyncio.run(auth.email_confirme("uuid-123")))
+
+    def test_supabase_injoignable_on_ne_sait_pas(self):
+        async def http(url, headers):
+            raise OSError("réseau coupé")
+
+        auth = SupabaseAuth(URL, ANON, ADMINS, service_key="service-key", http=http)
+        self.assertIsNone(asyncio.run(auth.email_confirme("uuid-123")))

@@ -36,7 +36,7 @@ from shared.agent.oauth_google import GoogleOAuth, secrets_from_token_response
 from shared.agent.project_tools import build_project_tools
 from shared.agent.tools import ToolRegistry
 from shared.agent.supabase_auth import SupabaseAuth, bearer_token
-from shared.agent.approvals import ApprovalStore, APPROVED
+from shared.agent.approvals import ApprovalStore, APPROVED, PENDING
 from shared.agent.telegram_notify import build_telegram_notifier
 from shared.agent.email_notify import build_email_notifier, decision_message, signup_message
 from shared.agent.adapters import ENGLISH_TUTOR_PROMPT
@@ -71,6 +71,16 @@ _TENANT_ID = "00000001-0001-0001-0001-000000000001"
 _ADMIN_EMAILS = [e.strip().lower() for e in os.environ.get("VINDIA_ADMIN_EMAILS", "").split(",") if e.strip()]
 _SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
 _SUPABASE_ANON = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+# Clé de service : seule à ouvrir l'API admin de Supabase. Sert à relire l'état réel
+# de confirmation d'une adresse au moment d'une validation d'accès.
+_SUPABASE_SERVICE = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+# PHASE D'ESSAI (VINDIA_AUTO_APPROVE=1) : l'accès s'ouvre sans validation manuelle.
+# Ce n'est PAS un contournement de la confirmation d'adresse : arriver jusqu'ici
+# suppose un jeton que Supabase a validé, or Supabase refuse la connexion tant que
+# l'adresse n'est pas confirmée. Ce qui saute, c'est le seul aval humain.
+# L'administrateur reste prévenu de chaque inscription et peut retirer un accès.
+# Repasser à 0 (défaut) rétablit la validation manuelle, sans toucher au code.
+_AUTO_APPROVE = os.environ.get("VINDIA_AUTO_APPROVE", "0").strip().lower() not in ("0", "", "false", "no")
 
 # Services lazily initialisés (MariaDB optionnel : la mémoire est désactivée si absent)
 _store = None
@@ -142,7 +152,8 @@ def _init_services() -> None:
     # Auth Supabase : valide les jetons de login. Sans config → personne ne peut
     # s'authentifier (toutes les routes protégées renverront 401).
     if _SUPABASE_URL and _SUPABASE_ANON:
-        _auth = SupabaseAuth(_SUPABASE_URL, _SUPABASE_ANON, _ADMIN_EMAILS)
+        _auth = SupabaseAuth(_SUPABASE_URL, _SUPABASE_ANON, _ADMIN_EMAILS,
+                             service_key=_SUPABASE_SERVICE)
         print(f"[VindIA] Auth Supabase configurée (admins: {len(_ADMIN_EMAILS)}).")
     # Validation humaine des comptes : un inscrit attend l'aval de l'admin.
     _approvals = ApprovalStore(os.path.join(_DATA_DIR, "approvals"))
@@ -486,6 +497,11 @@ async def _identify(request: web.Request):
         # Arriver ici signifie que Supabase a validé un jeton — donc que l'adresse a
         # été confirmée. C'est la seule preuve dont on dispose côté serveur.
         _approvals.marquer_adresse_confirmee(ident["member_id"])
+        # Phase d'essai : on ouvre l'accès tout de suite plutôt que de laisser la
+        # personne devant un écran d'attente. L'administrateur est prévenu quand même.
+        if _AUTO_APPROVE and status == PENDING:
+            _approvals.decide(ident["member_id"], True)
+            status = APPROVED
         ident["status"], ident["approved"] = status, (status == APPROVED)
         if is_new:
             # Alerter l'administrateur : sans cela une inscription passe inaperçue et
@@ -1258,6 +1274,7 @@ async def admin_decide(request: web.Request) -> web.Response:
         return web.json_response({"error": "réservé à l'administrateur"}, status=403)
     target = (data.get("member_id") or "").strip()
     approve = bool(data.get("approve"))
+    avertissement = ""   # rempli si l'accès est ouvert sans avoir pu vérifier l'adresse
     # L'adresse est lue AVANT la décision : après, l'enregistrement peut avoir changé.
     dossier = _approvals.get(target) if _approvals else None
     email_cible = (dossier or {}).get("email") or ""
@@ -1265,12 +1282,30 @@ async def admin_decide(request: web.Request) -> web.Response:
     # boîte que personne n'a prouvé posséder — elle peut même ne pas exister. Le
     # refus est posé ICI, côté serveur : un clic accidentel ne suffit pas à passer.
     if approve and dossier is not None and not dossier.get("adresse_confirmee"):
-        return web.json_response({
-            "error": "Cette adresse n'a jamais été confirmée : la personne ne s'est "
-                     "encore jamais connectée. Attends qu'elle clique le lien reçu "
-                     "par e-mail avant de lui ouvrir l'accès.",
-            "adresse_non_confirmee": True,
-        }, status=409)
+        # Le drapeau local ne se pose qu'au premier passage DANS l'application. Quelqu'un
+        # qui a cliqué le lien reçu par e-mail sans revenir ensuite restait coincé ici :
+        # adresse confirmée chez Supabase, mais impossible à valider. On redemande donc
+        # à Supabase, seule source qui fasse foi, avant de refuser.
+        confirme = await _auth.email_confirme(target) if _auth is not None else None
+        if confirme:
+            _approvals.marquer_adresse_confirmee(target)
+        elif confirme is False:
+            # Preuve NÉGATIVE : Supabase affirme que l'adresse n'est pas confirmée.
+            return web.json_response({
+                "error": "Cette adresse n'a pas encore été confirmée : Supabase indique "
+                         "qu'elle n'a jamais été validée. Attends que la personne clique "
+                         "le lien reçu par e-mail avant de lui ouvrir l'accès.",
+                "adresse_non_confirmee": True,
+            }, status=409)
+        else:
+            # On ne SAIT PAS (clé de service absente ou Supabase injoignable). Bloquer
+            # ici reviendrait à condamner tout compte que le hasard n'a pas fait repasser
+            # par l'application — c'est ce qui a coincé des inscriptions légitimes après
+            # la mise en place du garde-fou. On laisse donc décider l'administrateur,
+            # mais on le dit au lieu de le taire.
+            avertissement = ("Adresse non vérifiée : la vérification automatique auprès "
+                             "de Supabase est indisponible (clé de service absente). "
+                             "L'accès a été ouvert sur ta seule décision.")
     ok = _approvals.decide(target, approve) if _approvals else False
     # Prévenir la personne : sans cela, quelqu'un dont le compte vient d'être validé
     # n'en sait rien et devrait revenir essayer au hasard.
@@ -1279,7 +1314,8 @@ async def admin_decide(request: web.Request) -> web.Response:
         sujet, corps = decision_message(approve, _PUBLIC_URL)
         prevenu = await _email.notify(sujet, corps, to=[email_cible])
     return web.json_response({"ok": ok, "decision": "approved" if approve else "refused",
-                              "personne_prevenue": prevenu})
+                              "personne_prevenue": prevenu,
+                              "avertissement": avertissement})
 
 
 
